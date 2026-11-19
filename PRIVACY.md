@@ -18,11 +18,11 @@ OpenRouter and the model provider handle your audio under their own terms and pr
 
 ## Yiddish takes
 
-When Yiddish is selected, holding the mic button or using the Yiddish shortcut sends that recording to a Yiddish speech model on the developer's PC through a Cloudflare Worker. The recording and the model text are kept on that PC for review and training to improve the Yiddish model. The app sends a random install ID and app version so takes from one installation can be grouped for training splits. The ID is not an account name, but voice and dictated words may themselves identify you. These takes currently have no automatic deletion schedule. The Play Store version shows this and asks you to agree before the first Yiddish recording; the versions from GitHub do not ask.
+When Yiddish is selected, holding the mic button or using the Yiddish shortcut sends that recording to a Yiddish speech model on the developer's PC through a Cloudflare Worker. If the PC is busy or off, the same Worker sends it to the developer's cloud copy of the same model (on Modal), which types it and keeps nothing; while you record in Yiddish, the app asks that Worker every 10 seconds to start the cloud copy in case it is needed, which sends no audio. The recording and the model text are kept on that PC for review and training to improve the Yiddish model. The app sends a random install ID and app version so takes from one installation can be grouped for training splits. The ID is not an account name, but voice and dictated words may themselves identify you. These takes currently have no automatic deletion schedule. The Play Store version shows this and asks you to agree before the first Yiddish recording; the versions from GitHub do not ask.
 
 With Yiddish selected, sharing an audio or video file asks if it is Yiddish. If you answer Yiddish, the file is sent, kept and used the same way as a Yiddish take, marked as a shared file.
 
-To stop sending recordings for training, use a quick tap or the normal shortcut, or pick another language. This does not delete takes already sent. If the PC is unavailable, the recording uses the normal cloud model instead, through the free-minute server when applicable. A quick tap uses the normal cloud model without Yiddish training.
+To stop sending recordings for training, use a quick tap or the normal shortcut, or pick another language. This does not delete takes already sent. If neither the PC nor the cloud copy is available, the recording uses the normal cloud model instead, through the free-minute server when applicable. A quick tap uses the normal cloud model without Yiddish training.
 
 ## What stays on your phone
 

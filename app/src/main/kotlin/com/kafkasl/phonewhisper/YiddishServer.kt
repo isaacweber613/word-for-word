@@ -32,7 +32,8 @@ object YiddishServer {
     const val DISCLOSURE = "Yiddish mode sends your recording through Cloudflare to a speech model on the developer's PC. " +
         "The PC keeps the recording and the text it typed to improve the Yiddish model, " +
         "with a random install ID and the app version. There is no automatic deletion. " +
-        "If the PC is unavailable, your recording goes to OpenRouter and its speech provider instead, " +
+        "If the PC is busy or off, the same model types it on the developer's cloud server (Modal), which keeps nothing. " +
+        "If neither is available, your recording goes to OpenRouter and its speech provider instead, " +
         "through Word for Word's server when using free minutes. " +
         "A quick tap uses the normal cloud model without Yiddish training."
 
@@ -59,6 +60,26 @@ object YiddishServer {
         .readTimeout(180, TimeUnit.SECONDS)
         .writeTimeout(60, TimeUnit.SECONDS)
         .build()
+
+    /**
+     * Isaac (2026-11-19): when the PC is not free, the Worker sends a Yiddish take to the developer's cloud copy of the
+     * same model instead, which takes 8 to 13 s to start. Called when a Yiddish recording starts and every
+     * [WARM_EVERY_MS] while it goes on, so the start overlaps the recording; the Worker does nothing when the PC is
+     * free. The cloud stops 15 s after its last request, hence every 10 s. The answer is not waited for.
+     */
+    const val WARM_EVERY_MS = 10_000L
+
+    fun warm() {
+        val request = Request.Builder()
+            .url("$BASE/api/warm")
+            .header("x-client", "app")
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+        client.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {}
+            override fun onResponse(call: Call, response: Response) = response.close()
+        })
+    }
 
     /** Isaac (2026-11-08): when the PC with the Yiddish model is off, use the normal model (Auto). */
     const val OFF_NOTICE = "The Yiddish model is off. Used your normal model."

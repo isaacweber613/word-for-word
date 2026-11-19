@@ -745,6 +745,15 @@ class WhisperAccessibilityService : AccessibilityService() {
         dialog.show()
     }
 
+    /** While a Yiddish take records: start (or keep up) the cloud copy in case the PC is not free ([YiddishServer.warm]). */
+    private val warmYiddish = object : Runnable {
+        override fun run() {
+            if (state != State.RECORDING || !yiddishTake) return
+            YiddishServer.warm()
+            handler.postDelayed(this, YiddishServer.WARM_EVERY_MS)
+        }
+    }
+
     private fun startRecording(via: String, yiddish: Boolean = false) {
         if (yiddish && YiddishServer.needsConsent(prefs())) { askYiddishConsent(via); return }
         if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
@@ -778,7 +787,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         state = State.RECORDING
         setBusy(false)
         setAppearance(if (yiddish) COLOR_YIDDISH else COLOR_RECORDING)
-        if (yiddish) showFeedback("Yiddish", 1500)
+        if (yiddish) { showFeedback("Yiddish", 1500); warmYiddish.run() }
         startPulse()
         buzz()
 
