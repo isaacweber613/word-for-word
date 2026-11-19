@@ -68,7 +68,7 @@ export function wavSeconds(base64: string): number {
 }
 
 /**
- * Seconds to count for one recording. Since 0.9.6 the app sends small Ogg Opus audio instead of
+ * Seconds to count for one recording. Since 0.9.7 the app sends small Ogg Opus audio instead of
  * WAV (Isaac, 2026-11-19: "as fast as possible"), so the length comes from OpenRouter's answer
  * (usage.seconds). Without it: WAV from its size, Ogg at the app's 24 kbit/s (3,000 bytes a second).
  */
