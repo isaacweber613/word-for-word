@@ -30,4 +30,4 @@ sign selfInstall WordForWordSelfUpdate.apk
 
 VERSION=$(grep -o 'versionName = "[^"]*"' app/build.gradle.kts | cut -d'"' -f2)
 gh release create "v$VERSION" WordForWord.apk WordForWordSelfUpdate.apk \
-  -R isaacweber613/whisper-verbatim --title "Word for Word $VERSION" --notes-file "$NOTES" --target main
+  -R isaacweber613/word-for-word --title "Word for Word $VERSION" --notes-file "$NOTES" --target main

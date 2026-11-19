@@ -68,8 +68,8 @@ For a request about remote data, contact the developer through the issue link be
 
 ## Open source
 
-Word for Word is open source, based on [Phone Whisper](https://github.com/kafkasl/phone-whisper). You can read the code at [github.com/isaacweber613/whisper-verbatim](https://github.com/isaacweber613/whisper-verbatim).
+Word for Word is open source. You can read the code at [github.com/isaacweber613/word-for-word](https://github.com/isaacweber613/word-for-word).
 
 ## Contact
 
-For privacy questions, open an issue at [github.com/isaacweber613/whisper-verbatim/issues](https://github.com/isaacweber613/whisper-verbatim/issues).
+For privacy questions, open an issue at [github.com/isaacweber613/word-for-word/issues](https://github.com/isaacweber613/word-for-word/issues).

@@ -7,7 +7,7 @@
       <img src="docs/badge-google-play.svg" height="60" alt="Get it on Google Play">
     </a>
     &nbsp;
-    <a href="https://github.com/isaacweber613/whisper-verbatim/releases/latest">
+    <a href="https://github.com/isaacweber613/word-for-word/releases/latest">
       <img src="docs/badge-github-releases.svg" height="60" alt="Download on GitHub Releases">
     </a>
   </p>
@@ -25,7 +25,7 @@
 
 ## Installing from GitHub
 
-Download **`WordForWord.apk`** from the [latest release](https://github.com/isaacweber613/whisper-verbatim/releases/latest) (recommended — opens updates in your browser). There is also **`WordForWordSelfUpdate.apk`**, which installs updates in-app (Play Protect flags it; tap "Install anyway" if you prefer it).
+Download **`WordForWord.apk`** from the [latest release](https://github.com/isaacweber613/word-for-word/releases/latest) (recommended — opens updates in your browser). There is also **`WordForWordSelfUpdate.apk`**, which installs updates in-app (Play Protect flags it; tap "Install anyway" if you prefer it).
 
 ## Privacy & Accessibility
 
@@ -33,4 +33,4 @@ Word for Word uses Android's Accessibility service only to type dictated text in
 
 ---
 
-Started as a fork of [kafkasl/phone-whisper](https://github.com/kafkasl/phone-whisper). Licensed under Apache 2.0 ([LICENSE](LICENSE)).
+Licensed under Apache 2.0 ([LICENSE](LICENSE)).

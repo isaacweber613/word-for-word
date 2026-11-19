@@ -13,7 +13,7 @@ import org.json.JSONObject
  */
 object Updater {
     private const val TAG = "PhoneWhisper"
-    private const val LATEST_RELEASE = "https://api.github.com/repos/isaacweber613/whisper-verbatim/releases/latest"
+    private const val LATEST_RELEASE = "https://api.github.com/repos/isaacweber613/word-for-word/releases/latest"
     /** Each edition updates to its own file in the release. */
     const val APK_NAME = BuildConfig.APK_NAME
 

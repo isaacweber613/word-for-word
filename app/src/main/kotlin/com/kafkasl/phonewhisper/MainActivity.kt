@@ -255,7 +255,7 @@ class MainActivity : AppCompatActivity() {
         if (BuildConfig.FLAVOR == "play") {
             root.addView(settingsRow("Privacy policy", "How recordings, text and usage data are handled") {
                 startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(
-                    "https://isaacweber613.github.io/whisper-verbatim/privacy.html")))
+                    "https://nuchemweber.com/wordforword/privacy")))
             })
         }
 
