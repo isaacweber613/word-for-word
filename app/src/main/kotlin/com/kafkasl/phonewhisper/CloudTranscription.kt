@@ -2,6 +2,7 @@ package com.kafkasl.phonewhisper
 
 import android.content.Context
 import android.util.Log
+import kotlin.concurrent.thread
 
 /**
  * One recording through the picked cloud model, and through another model when that one is busy
@@ -43,20 +44,35 @@ object CloudTranscription {
         // Audio length to a tenth of a second (32,000 bytes a second after the 44-byte header), for usage stats.
         val seconds = Math.round((wav.size - 44) / 3200.0) / 10.0
 
+        // Built-in models take the much smaller Ogg Opus (see OggOpus); custom model IDs get WAV.
+        // If a model refuses the Ogg audio (HTTP 400), the same recording goes again as WAV.
+        val builtIn = TranscriberClient.CLOUD_MODELS.map { it.id }.toSet()
+        var ogg: ByteArray? = null
+        fun sendWav(m: String, cb: (TranscriberClient.Result) -> Unit) =
+            TranscriberClient.transcribe(wav, apiKey, m, verbatim, language, deviceId, "wav", cb)
+        fun send(m: String, cb: (TranscriberClient.Result) -> Unit) {
+            val small = ogg
+            if (small == null || m !in builtIn) return sendWav(m, cb)
+            TranscriberClient.transcribe(small, apiKey, m, verbatim, language, deviceId, "ogg") { r ->
+                if (r.code == 400) { Log.i(TAG, "$m refused Ogg audio; sending WAV"); sendWav(m, cb) } else cb(r)
+            }
+        }
+
         fun done(text: String, used: String) {
             Analytics.track("transcribed", mapOf("model" to used, "seconds" to seconds,
                 "backup_model" to (used != model), "free_minutes" to (deviceId != null)))
             callback(Outcome(text, used, model.takeIf { it != used }, null))
         }
 
-        TranscriberClient.transcribe(wav, apiKey, model, verbatim, language, deviceId) { result ->
+        // Compressing takes a moment, so it runs off the main thread; replies already come on OkHttp's.
+        thread { ogg = OggOpus.encode(context, wav); send(model) { result ->
             if (!result.text.isNullOrBlank()) {
                 done(result.text, model)
             } else if (TranscriberClient.shouldTryAnotherModel(result.code, result.detail)) {
                 // The chosen model is busy or down: send the same recording to another model right away.
                 val backup = TranscriberClient.fallbackFor(model)
                 Log.i(TAG, "$model failed (${result.code}), trying $backup")
-                TranscriberClient.transcribe(wav, apiKey, backup, verbatim, language, deviceId) { second ->
+                send(backup) { second ->
                     Log.i(TAG, "$backup answered: ${if (!second.text.isNullOrBlank()) "text" else second.code?.let { "error $it" } ?: "no text"}")
                     if (!second.text.isNullOrBlank()) done(second.text, backup)
                     else callback(Outcome(null, model, null, if (second.error == null && second.text != null) second else result))
@@ -64,7 +80,7 @@ object CloudTranscription {
             } else {
                 callback(Outcome(null, model, null, result))
             }
-        }
+        } }
     }
 
     /** Counts a failed transcription. True when the model answered but heard no words. */

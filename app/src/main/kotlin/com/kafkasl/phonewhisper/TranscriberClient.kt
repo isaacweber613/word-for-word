@@ -165,15 +165,16 @@ object TranscriberClient {
         "elevenlabs/scribe-v2",
     )
 
-    fun buildBody(wavData: ByteArray, model: String, verbatim: Boolean, language: String = "auto"): String =
-        buildBodyJson(Base64.encodeToString(wavData, Base64.NO_WRAP), model, verbatim, language).toString()
+    fun buildBody(audio: ByteArray, model: String, verbatim: Boolean, language: String = "auto",
+                  format: String = "wav"): String =
+        buildBodyJson(Base64.encodeToString(audio, Base64.NO_WRAP), model, verbatim, language, format).toString()
 
     /** The request body, separate from Android's Base64 encoder so it can be unit tested. */
     internal fun buildBodyJson(audioBase64: String, model: String, verbatim: Boolean,
-                               language: String = "auto"): JSONObject {
+                               language: String = "auto", format: String = "wav"): JSONObject {
         val body = JSONObject()
             .put("model", model)
-            .put("input_audio", JSONObject().put("data", audioBase64).put("format", "wav"))
+            .put("input_audio", JSONObject().put("data", audioBase64).put("format", format))
         languageCode(model, language)?.let { body.put("language", it) }
         if (verbatim || model in CLEAN_SWITCH_MODELS) {
             body.put("provider", JSONObject().put("options", styleOptions(verbatim)))
@@ -186,7 +187,7 @@ object TranscriberClient {
      * to Word for Word's server, which uses its own OpenRouter key and counts free minutes.
      */
     fun transcribe(wavData: ByteArray, apiKey: String, model: String, verbatim: Boolean, language: String,
-                   deviceId: String? = null, callback: (Result) -> Unit) {
+                   deviceId: String? = null, format: String = "wav", callback: (Result) -> Unit) {
         val viaServer = deviceId != null
         val builder = Request.Builder()
         if (viaServer) {
@@ -197,7 +198,7 @@ object TranscriberClient {
                 .header("X-Title", "Word for Word")
         }
         val request = builder
-            .post(buildBody(wavData, model, verbatim, language).toRequestBody("application/json".toMediaType()))
+            .post(buildBody(wavData, model, verbatim, language, format).toRequestBody("application/json".toMediaType()))
             .build()
 
         val languageSent = languageCode(model, language) != null
@@ -209,7 +210,7 @@ object TranscriberClient {
                 if (languageSent && (response.code == 400 || response.code == 422) &&
                     !body.contains("does not exist")) {
                     // The model refused the language: send again and let it guess.
-                    transcribe(wavData, apiKey, model, verbatim, "auto", deviceId, callback)
+                    transcribe(wavData, apiKey, model, verbatim, "auto", deviceId, format, callback)
                 } else if (response.isSuccessful) {
                     callback(parseResponse(body))
                 } else {

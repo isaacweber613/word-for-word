@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { handle, monthOf, wavSeconds, type Env, type Usage } from "../src/index";
+import { audioSeconds, handle, monthOf, wavSeconds, type Env, type Usage } from "../src/index";
 
 const device = "a".repeat(64);
 const env = { OPENROUTER_KEY: "test-key", FREE_SECONDS_PER_MONTH: "1800" } as Env;
@@ -30,6 +30,14 @@ const ok = (async () => Response.json({ text: "hello" })) as unknown as typeof f
 describe("transcription server", () => {
   it("measures audio length from the WAV", () => {
     expect(wavSeconds(audio(10))).toBeCloseTo(10, 5);
+  });
+
+  it("counts compressed audio by the seconds OpenRouter reports", () => {
+    expect(audioSeconds(JSON.stringify({ text: "hi", usage: { seconds: 13.74 } }), "AAAA", "ogg")).toBe(13.74);
+  });
+
+  it("estimates Ogg audio from its size when OpenRouter reports no seconds", () => {
+    expect(audioSeconds(JSON.stringify({ text: "hi" }), Buffer.alloc(30000).toString("base64"), "ogg")).toBeCloseTo(10, 5);
   });
 
   it("names months in UTC", () => {

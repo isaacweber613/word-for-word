@@ -87,6 +87,11 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   total cost, since a faked device ID could get extra free minutes until Play purchases and
   Play Integrity checks are added. It's stored only as the Worker secret `OPENROUTER_KEY`.
 - Free minutes per month: `FREE_SECONDS_PER_MONTH` in `server/wrangler.jsonc`.
+- Since 0.9.6 (Isaac, 2026-11-19: "It should be as fast as possible") cloud recordings upload as
+  Ogg Opus, about 12 times smaller than WAV (`OggOpus.kt`, Android 10+). The app writes the Ogg
+  pages itself (`OggWriter.kt`) because MAI-Transcribe 2 rejects Android's own Ogg muxer output
+  as malformed. The server counts seconds from OpenRouter's `usage.seconds`. Yiddish takes to the
+  PC stay WAV.
 - Deploy: `cd server && npm test && npx wrangler deploy`.
 - Paid plans (Play Billing) aren't built yet; they need Isaac's Play Console account.
 

@@ -67,6 +67,21 @@ export function wavSeconds(base64: string): number {
   return Math.max(0, bytes - 44) / 32000;
 }
 
+/**
+ * Seconds to count for one recording. Since 0.9.6 the app sends small Ogg Opus audio instead of
+ * WAV (Isaac, 2026-11-19: "as fast as possible"), so the length comes from OpenRouter's answer
+ * (usage.seconds). Without it: WAV from its size, Ogg at the app's 24 kbit/s (3,000 bytes a second).
+ */
+export function audioSeconds(responseText: string, base64: string, format: string): number {
+  try {
+    const s = (JSON.parse(responseText) as { usage?: { seconds?: unknown } }).usage?.seconds;
+    if (typeof s === "number" && s > 0) return s;
+  } catch { /* fall through */ }
+  if (format === "wav") return wavSeconds(base64);
+  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
+  return ((base64.length * 3) / 4 - padding) / 3000;
+}
+
 function error(status: number, message: string, code?: string): Response {
   return Response.json({ error: { message, ...(code ? { code } : {}) } }, { status });
 }
@@ -92,7 +107,7 @@ export async function handle(request: Request, env: Env, usage: Usage, now = new
   if (url.pathname !== "/v1/transcriptions" || request.method !== "POST") return error(404, "Not found.");
   if (!device) return error(400, "Missing device ID.");
 
-  let body: { model?: unknown; input_audio?: { data?: unknown } };
+  let body: { model?: unknown; input_audio?: { data?: unknown; format?: unknown } };
   try {
     body = await request.json();
   } catch {
@@ -104,7 +119,7 @@ export async function handle(request: Request, env: Env, usage: Usage, now = new
   const audio = body.input_audio?.data;
   if (typeof audio !== "string" || audio.length === 0) return error(400, "No audio in the request.");
 
-  const seconds = wavSeconds(audio);
+  const format = typeof body.input_audio?.format === "string" ? body.input_audio.format : "wav";
   const used = await usage.get(device, month);
   if (used >= free) {
     return error(402, "You've used your " + Math.round(free / 60) + " free minutes this month.", "free_minutes_used");
@@ -121,7 +136,7 @@ export async function handle(request: Request, env: Env, usage: Usage, now = new
   });
   const text = await upstream.text();
   // Only audio that came back as text counts against the free minutes.
-  if (upstream.ok) await usage.add(device, month, seconds);
+  if (upstream.ok) await usage.add(device, month, audioSeconds(text, audio, format));
   return new Response(text, { status: upstream.status, headers: { "Content-Type": "application/json" } });
 }
 
