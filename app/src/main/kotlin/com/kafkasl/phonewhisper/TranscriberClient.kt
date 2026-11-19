@@ -202,7 +202,9 @@ object TranscriberClient {
             .build()
 
         val languageSent = languageCode(model, language) != null
-        client.newCall(request).enqueue(object : Callback {
+        // Each step's time goes to the usage stats (UploadTiming), to find where slow uploads stall.
+        client.newBuilder().eventListener(UploadTiming(if (viaServer) "server" else "openrouter", model, format)).build()
+            .newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) =
                 callback(Result(null, if (viaServer) serverNetworkError(e) else networkError(e)))
             override fun onResponse(call: Call, response: Response) {

@@ -46,7 +46,7 @@ To see how the app is used and where it fails, the app sends anonymous usage cou
 
 What it sends:
 
-- Events: the app opening or closing, a recording starting (by the on-screen button or the keyboard shortcut), a transcription working or failing (with the model name, the recording's length in seconds, and the error code), and whether the text was typed, pasted, or only copied.
+- Events: the app opening or closing, a recording starting (by the on-screen button or the keyboard shortcut), a transcription working or failing (with the model name, the recording's length in seconds, and the error code), whether the text was typed, pasted, or only copied, and how long each upload took (connecting, sending, waiting for the answer) with its size.
 - The app version and build, the Android version, and the phone's maker and model.
 - A random ID made for this install, so counts can tell installs apart. It isn't linked to your name, account, or phone number.
 
