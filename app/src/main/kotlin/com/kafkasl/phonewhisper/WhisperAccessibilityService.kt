@@ -95,10 +95,17 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var pcmStream: ByteArrayOutputStream? = null
     private val handler = Handler(Looper.getMainLooper())
     private val hideFeedback = Runnable {
+        feedbackOutlivesTextBox = false
         feedbackView?.animate()?.alpha(0f)?.setDuration(180)?.withEndAction {
             feedbackView?.visibility = View.GONE
         }?.start()
     }
+    /**
+     * Isaac (2026-11-19): a message goes away when the keyboard (or the text box) goes away,
+     * except one that's about the button being hidden, like "Hidden in this app".
+     */
+    private var feedbackOutlivesTextBox = false
+    private var hadTextBox = false
 
     /** Set when the keyboard shortcut is on; the mic button then shows only while you talk. */
     private var shortcut: ShortcutMatcher? = null
@@ -255,7 +262,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         val apps = p.getStringSet(PREF_CURSOR_HIDDEN_APPS, emptySet())!! + pkg
         p.edit().putStringSet(PREF_CURSOR_HIDDEN_APPS, apps).apply()
         Log.i(TAG, "Button hidden with the keyboard closed in $pkg")
-        showFeedback("Hidden in ${appLabel(pkg)} until the keyboard opens. Settings brings it back.", 3500)
+        showFeedback("Hidden in ${appLabel(pkg)} until the keyboard opens. Settings brings it back.", 3500, outlivesTextBox = true)
         handler.post { onStateChanged?.invoke() }
         scheduleVisibilityUpdate()
     }
@@ -266,8 +273,14 @@ class WhisperAccessibilityService : AccessibilityService() {
         // Never hide mid-recording or mid-transcription, even if the keyboard closes.
         // With the keyboard shortcut on, the button shows only while you talk, not with the keyboard.
         val busy = state == State.RECORDING || state == State.TRANSCRIBING
+        val textBox = keyboardVisible() || textBoxFocused()
+        if (hadTextBox && !textBox && !busy && !feedbackOutlivesTextBox) {
+            handler.removeCallbacks(hideFeedback)
+            hideFeedback.run()
+        }
+        hadTextBox = textBox
         val show = if (shortcut != null) busy || state == State.RETRY || showingPasteFailure
-                   else busy || keyboardVisible() || textBoxFocused()
+                   else busy || textBox
         val wasShown = overlay.visibility == View.VISIBLE
         if (show == wasShown) return
         overlay.visibility = if (show) View.VISIBLE else View.GONE
@@ -606,12 +619,13 @@ class WhisperAccessibilityService : AccessibilityService() {
         feedbackParams.y = maxOf(margin, bubbleParams.y - (FEEDBACK_OFFSET_DP * dp).toInt())
     }
 
-    private fun showFeedback(text: String, durationMs: Long = 2000) {
+    private fun showFeedback(text: String, durationMs: Long = 2000, outlivesTextBox: Boolean = false) {
         handler.post {
             val view = feedbackView ?: return@post
             val bubbleParams = layoutParams ?: return@post
             val feedbackParams = feedbackLayoutParams ?: return@post
             val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            feedbackOutlivesTextBox = outlivesTextBox
 
             view.text = text
             positionFeedback(feedbackParams, bubbleParams)
@@ -692,7 +706,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             state = State.RETRY
             setBusy(false)
             setAppearance(COLOR_RETRY)
-            showFeedback(if (shortcut != null) "$msg\nPress the shortcut to try again." else "$msg\nTap to try again. Hold to discard.", 6000)
+            showFeedback(if (shortcut != null) "$msg\nPress the shortcut to try again." else "$msg\nTap to try again. Hold to discard.", 4000)
         }
     }
 
@@ -1183,6 +1197,7 @@ class WhisperAccessibilityService : AccessibilityService() {
      */
     private fun toast(msg: String) {
         Log.w(TAG, "Message to user: $msg")
-        showFeedback(msg, 4500)
+        // Isaac (2026-11-19) wanted errors to go away faster: 4.5 s became 2.5 s.
+        showFeedback(msg, 2500)
     }
 }

@@ -51,6 +51,11 @@ the private upload key. The key is `~/.android/wordforword-upload.jks`; its pass
 `keystore.properties` in the repo root, which is never committed. Only the Play build uses that
 key; the GitHub builds keep the debug key. Every change still goes into all three builds.
 
+Isaac (2026-11-19): Google reviews every Play update, so don't upload one for every small change.
+Collect changes and upload to Play at most once every day or two. GitHub releases still ship with
+each change. Upload a new `versionCode` in Play Console (Test and release, the track's Create new
+release), then send the change for review.
+
 ## What only the Play build shows (Isaac, 2026-11-11)
 
 Isaac: add consent dialogs, settings rows and policy links "only if it's really needed and if
