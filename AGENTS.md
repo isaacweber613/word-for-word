@@ -19,7 +19,8 @@ Every change goes into both builds, and every release ships both.
 Isaac (2026-11-06): "Anything you do that makes the app bigger in size, you have to consult me
 first." Then: "Up to 5% bigger, you don't have to ask me." So measure every change that grows the
 APK or its installed size. Up to 5% bigger, go ahead and mention the sizes. More than 5%, tell him
-the before and after sizes and wait for his OK.
+the before and after sizes and wait for his OK. He OK'd Play Billing (2026-11-20, "yes."): the Play
+APK went from 2,300,396 to 2,694,603 bytes, 17% bigger.
 
 ## Releasing
 
@@ -134,7 +135,9 @@ stand-in in `src/github`), the Settings row "Subscribe" / "Subscribed", and the 
 messages (`FreeMinutes.OUT_FREE`, `OUT_HOURS`). Not on sale until Play Console has a payments
 profile (Monetize needs a Google Payments merchant account, which needs Isaac's business and bank
 details) and the products exist: subscription `monthly` ($3, base plan monthly) and one-time
-product `extra_hours_4` ($1).
+product `extra_hours_4` ($1). Isaac (2026-11-20): "ok i will set that up when i have time."
+Paid hours count 1:1 on any model up to $0.15 an hour and faster above it (free minutes: $0.10):
+"i think i can afford up to 15 cents per hour still gives 10 hours a month".
 
 - One subscription: $3 a month for 10 hours of transcription a month. No yearly plan.
 - Extra hours: $1 for 4 hours. They never expire, but work only while the $3 subscription is
