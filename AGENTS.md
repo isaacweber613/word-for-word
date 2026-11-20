@@ -117,6 +117,18 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
 - Deploy: `cd server && npm test && npx wrangler deploy`.
 - Paid plans (Play Billing) aren't built yet; they need Isaac's Play Console account.
 
+## Paid plan (agreed with Isaac 2026-11-20, not built yet)
+
+- One subscription: $3 a month for 10 hours of transcription a month. No yearly plan.
+- Extra hours: $1 for 4 hours. They never expire, but work only while the $3 subscription is
+  active.
+- A model that costs more than the default uses up the hours faster, in proportion to its price.
+  The app doesn't show hours left: "it shouldn't really be shown it's going to be confusing."
+- When the free minutes run out, the app offers the subscription first; your own OpenRouter key
+  stays an option, not the main suggestion.
+- Yiddish takes to the PC or its cloud copy don't count against minutes or hours (they never
+  reach this server). Only a Yiddish recording that falls back to the normal cloud model counts.
+
 ## Testing the keyboard shortcut on an emulator
 
 `adb shell input keyevent` and `input keycombination` never reach accessibility services, so
