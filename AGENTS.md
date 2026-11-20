@@ -56,6 +56,11 @@ Collect changes and upload to Play at most once every day or two. GitHub release
 each change. Upload a new `versionCode` in Play Console (Test and release, the track's Create new
 release), then send the change for review.
 
+Isaac (2026-11-19), after Play notes said Yiddish works "when the developer's PC is busy or off":
+"There was no need in mentioning the developer's PC. Nobody needs to know that it goes to my PC."
+Release notes and store text describe what users get, not where the servers run. Only the privacy
+policy and the Yiddish consent screen say where recordings go.
+
 ## What only the Play build shows (Isaac, 2026-11-11)
 
 Isaac: add consent dialogs, settings rows and policy links "only if it's really needed and if
