@@ -183,6 +183,19 @@ object TranscriberClient {
     }
 
     /**
+     * A tiny request to the host [transcribe] will use, so its connection is open and ready when
+     * the recording is (see CloudTranscription.warm). The answer, often 404, is ignored.
+     */
+    fun warm(viaServer: Boolean) {
+        val url = if (viaServer) BuildConfig.SERVICE_URL + "/v1/transcriptions"
+                  else "https://openrouter.ai/api/v1/audio/transcriptions"
+        client.newCall(Request.Builder().url(url).head().build()).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {}
+            override fun onResponse(call: Call, response: Response) = response.close()
+        })
+    }
+
+    /**
      * With [deviceId] set (the Play build with no key entered, see FreeMinutes), the audio goes
      * to Word for Word's server, which uses its own OpenRouter key and counts free minutes.
      */

@@ -93,6 +93,8 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var feedbackLayoutParams: WindowManager.LayoutParams? = null
     private var audioRecord: AudioRecord? = null
     private var pcmStream: ByteArrayOutputStream? = null
+    /** The same recording, compressed while it records (cloud takes only, see OggOpus.Stream). */
+    private var opusStream: OggOpus.Stream? = null
     private val handler = Handler(Looper.getMainLooper())
     private val hideFeedback = Runnable {
         feedbackOutlivesTextBox = false
@@ -295,6 +297,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        opusStream?.cancel()
         consentDialog?.dismiss()
         instance = null
         handler.post { onStateChanged?.invoke() }
@@ -782,6 +785,11 @@ class WhisperAccessibilityService : AccessibilityService() {
             return
         }
         pcmStream = ByteArrayOutputStream()
+        // Cloud takes compress while recording and open the upload connection now, so the text
+        // comes back sooner after the stop. Yiddish takes go to the PC as WAV.
+        val opus = if (yiddish) null else OggOpus.Stream.start()
+        opusStream = opus
+        if (!yiddish) CloudTranscription.warm(this)
         Analytics.track("recording_started", mapOf("via" to via))
         yiddishTake = yiddish
         state = State.RECORDING
@@ -797,6 +805,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 val n = audioRecord?.read(buf, 0, buf.size) ?: break
                 if (n > 0) {
                     pcmStream?.write(buf, 0, n)
+                    opus?.write(buf, n)
                     bars?.setLevel(levelOf(buf, n))
                 }
             }
@@ -816,13 +825,16 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         val pcm = pcmStream?.toByteArray() ?: ByteArray(0)
         pcmStream = null
+        val opus = opusStream
+        opusStream = null
+        if (pcm.size < 32000 / 3) opus?.cancel()
 
         if (pcm.isEmpty()) { reset("No audio was recorded. Check that the microphone isn't in use by another app."); return }
         // 16 kHz, 16-bit mono = 32,000 bytes per second
         if (pcm.size < 32000 / 3) { reset("Recording too short. Tap, speak, then tap again."); return }
 
         // This fork is cloud-only; on-phone models aren't shipped.
-        if (yiddishTake) transcribeYiddish(pcm) else transcribeApi(pcm)
+        if (yiddishTake) transcribeYiddish(pcm) else transcribeApi(pcm, opus)
     }
 
     /** A Yiddish take: the Yiddish model on Isaac's PC (see [YiddishServer]). */
@@ -873,9 +885,10 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun transcribeApi(pcm: ByteArray) {
-        if (!CloudTranscription.ready(this)) { failWithRetry(pcm, CloudTranscription.NO_KEY); return }
-        CloudTranscription.run(this, WavWriter.encode(pcm)) { o ->
+    /** [opus] is the same recording compressed while it recorded, when there is one. */
+    private fun transcribeApi(pcm: ByteArray, opus: OggOpus.Stream? = null) {
+        if (!CloudTranscription.ready(this)) { opus?.cancel(); failWithRetry(pcm, CloudTranscription.NO_KEY); return }
+        CloudTranscription.run(this, WavWriter.encode(pcm), opus) { o ->
             if (o.text != null) {
                 o.notice?.let { showFeedback(it, 4000) }
                 handleTranscriptionResult(o.text, o.model)

@@ -98,6 +98,13 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   pages itself (`OggWriter.kt`) because MAI-Transcribe 2 rejects Android's own Ogg muxer output
   as malformed. The server counts seconds from OpenRouter's `usage.seconds`. Yiddish takes to the
   PC stay WAV.
+- Since 0.9.9 dictation compresses while recording (`OggOpus.Stream`) and opens the upload
+  connection when recording starts (`CloudTranscription.warm`). In 0.9.7 and 0.9.8, compressing
+  after the stop took about 7 s for a 12.5 s recording on Isaac's Pixel. Isaac's target for the
+  after-stop compression is under 100 ms; 0.9.9 measured 24 ms for 13.6 s on the emulator.
+  Agent-device snapshots switch the app's accessibility service off on the emulator, because
+  its UI automation helper suppresses other services. Tap with `adb shell input tap` while
+  testing the mic button.
 - Deploy: `cd server && npm test && npx wrangler deploy`.
 - Paid plans (Play Billing) aren't built yet; they need Isaac's Play Console account.
 

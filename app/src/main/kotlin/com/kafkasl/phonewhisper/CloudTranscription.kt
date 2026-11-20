@@ -29,8 +29,20 @@ object CloudTranscription {
     fun ready(context: Context) =
         !prefs(context).getString("api_key", "").isNullOrBlank() || FreeMinutes.inUse(context)
 
-    /** [wav] is 16 kHz, 16-bit mono, as WavWriter makes it. */
-    fun run(context: Context, wav: ByteArray, callback: (Outcome) -> Unit) {
+    /**
+     * Opens the connection to the server the recording will go to, while the person is still
+     * speaking, so the upload doesn't spend about a second on it after they stop (Isaac's
+     * 2026-11-19 upload: 967 ms connecting before the first byte went out).
+     */
+    fun warm(context: Context) {
+        if (ready(context)) TranscriberClient.warm(viaServer = FreeMinutes.inUse(context))
+    }
+
+    /**
+     * [wav] is 16 kHz, 16-bit mono, as WavWriter makes it. [stream] has the same audio already
+     * compressed while recording; without it the recording is compressed here.
+     */
+    fun run(context: Context, wav: ByteArray, stream: OggOpus.Stream? = null, callback: (Outcome) -> Unit) {
         val p = prefs(context)
         val apiKey = p.getString("api_key", "") ?: ""
         // The Play build with no key entered uses Word for Word's server and its free minutes.
@@ -48,6 +60,7 @@ object CloudTranscription {
         // If a model refuses the Ogg audio (HTTP 400), the same recording goes again as WAV.
         val builtIn = TranscriberClient.CLOUD_MODELS.map { it.id }.toSet()
         var ogg: ByteArray? = null
+        var compressMs = 0L
         fun sendWav(m: String, cb: (TranscriberClient.Result) -> Unit) =
             TranscriberClient.transcribe(wav, apiKey, m, verbatim, language, deviceId, "wav", cb)
         fun send(m: String, cb: (TranscriberClient.Result) -> Unit) {
@@ -60,12 +73,19 @@ object CloudTranscription {
 
         fun done(text: String, used: String) {
             Analytics.track("transcribed", mapOf("model" to used, "seconds" to seconds,
-                "backup_model" to (used != model), "free_minutes" to (deviceId != null)))
+                "backup_model" to (used != model), "free_minutes" to (deviceId != null),
+                // How long the phone took to shrink the recording before uploading it.
+                "compress_ms" to compressMs))
             callback(Outcome(text, used, model.takeIf { it != used }, null))
         }
 
         // Compressing takes a moment, so it runs off the main thread; replies already come on OkHttp's.
-        thread { ogg = OggOpus.encode(context, wav); send(model) { result ->
+        thread {
+            val t = System.nanoTime()
+            ogg = stream?.finish() ?: OggOpus.encode(wav)
+            compressMs = (System.nanoTime() - t) / 1_000_000
+            Log.i(TAG, "Compressed ${wav.size} bytes to ${ogg?.size ?: 0} in $compressMs ms")
+            send(model) { result ->
             if (!result.text.isNullOrBlank()) {
                 done(result.text, model)
             } else if (TranscriberClient.shouldTryAnotherModel(result.code, result.detail)) {
