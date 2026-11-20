@@ -68,6 +68,14 @@ describe("transcription server", () => {
       { id: "x", per_hour: 0.54 })).toBeCloseTo(64.8, 5);
   });
 
+  it("counts paid hours 1:1 up to $0.15 an hour, faster above it", () => {
+    const at = (perHour: number) => planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * perHour / 3600 } }),
+      "", "ogg", { id: "x", per_hour: perHour }, 0.15);
+    expect(at(0.06)).toBeCloseTo(12, 5);
+    expect(at(0.15)).toBeCloseTo(12, 5);
+    expect(at(0.27)).toBeCloseTo(21.6, 5);
+  });
+
   it("uses the model's price when OpenRouter reports no cost, never less than one second a second", () => {
     expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), "", "ogg", { id: "x", per_hour: 0.27 })).toBeCloseTo(27, 5);
     expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), "", "ogg", { id: "x", per_hour: 0.06 })).toBeCloseTo(10, 5);

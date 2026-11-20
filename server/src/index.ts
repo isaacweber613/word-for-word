@@ -7,8 +7,9 @@
  * 2026-11-20): a $3 monthly subscription with 10 hours each paid month, and $1 top-ups of 4 hours
  * that never expire but work only while subscribed.
  *
- * Everything is counted in plan seconds: one second of audio on a model costing $0.10 an hour.
- * A pricier model uses them up faster, so no model choice loses money. The model and its two
+ * Everything is counted in plan seconds: one second of audio on a model costing $0.10 an hour
+ * for free minutes, $0.15 an hour for paid hours (Isaac, 2026-11-20: "i think i can afford up to
+ * 15 cents per hour still gives 10 hours a month"). A pricier model uses them up faster. The model and its two
  * backups, for free and for paying phones, are Isaac's choice on his model page
  * (yiddishvoicetotext.com, Models), saved in this server's D1 table `models`.
  *
@@ -41,8 +42,9 @@ export const TOPUP = "extra_hours_4";
 /** 10 hours each paid month, 4 hours per top-up, in plan seconds. */
 export const SUB_SECONDS = 10 * 3600;
 export const TOPUP_SECONDS = 4 * 3600;
-/** The model price one plan second stands for: $0.10 an hour. */
-const BASE_PER_HOUR = 0.1;
+/** The model price one plan second stands for: $0.10 an hour free, $0.15 an hour paid. */
+export const FREE_BASE_PER_HOUR = 0.1;
+export const PAID_BASE_PER_HOUR = 0.15;
 
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/audio/transcriptions";
 
@@ -77,15 +79,19 @@ export function audioSeconds(responseText: string, base64: string, format: strin
 }
 
 /**
- * Plan seconds one recording uses: what OpenRouter charged (usage.cost) at $0.10 an hour. Without
- * a cost, the audio length times the model's price against $0.10.
+ * Plan seconds one recording uses: its audio length, or more for a model pricier than [base]
+ * dollars an hour (what OpenRouter charged, usage.cost, at [base] an hour). A model at or under
+ * [base] counts 1:1, so 10 paid hours are 10 real hours on any model up to $0.15 an hour.
  */
-export function planSeconds(responseText: string, base64: string, format: string, model: ModelChoice): number {
+export function planSeconds(responseText: string, base64: string, format: string, model: ModelChoice,
+                            base = FREE_BASE_PER_HOUR): number {
   try {
     const cost = (JSON.parse(responseText) as { usage?: { cost?: unknown } }).usage?.cost;
-    if (typeof cost === "number" && cost > 0) return cost / BASE_PER_HOUR * 3600;
+    if (typeof cost === "number" && cost > 0) {
+      return Math.max(audioSeconds(responseText, base64, format), cost / base * 3600);
+    }
   } catch { /* fall through */ }
-  return audioSeconds(responseText, base64, format) * Math.max(1, (model.per_hour ?? BASE_PER_HOUR) / BASE_PER_HOUR);
+  return audioSeconds(responseText, base64, format) * Math.max(1, (model.per_hour ?? base) / base);
 }
 
 /**
@@ -220,7 +226,8 @@ export async function handle(request: Request, env: Env, store: Store, now = new
 
   // Only audio that came back as text counts. The count is saved after the answer goes back.
   if (status >= 200 && status < 300 && used) {
-    await later(store.charge(device, month, pick.bucket, planSeconds(text, audio, format, used), a.sub));
+    await later(store.charge(device, month, pick.bucket, planSeconds(text, audio, format, used,
+      pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR), a.sub));
   }
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
 }
