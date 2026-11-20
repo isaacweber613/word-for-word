@@ -59,7 +59,8 @@ release), then send the change for review.
 Isaac (2026-11-19), after Play notes said Yiddish works "when the developer's PC is busy or off":
 "There was no need in mentioning the developer's PC. Nobody needs to know that it goes to my PC."
 Release notes and store text describe what users get, not where the servers run. Only the privacy
-policy and the Yiddish consent screen say where recordings go.
+policy and the Yiddish consent screen say where recordings go. Same day: "Yiddish typing doesn't
+have to be mentioned. It's halfway a hidden feature." Leave Yiddish out of Play release notes.
 
 ## What only the Play build shows (Isaac, 2026-11-11)
 
