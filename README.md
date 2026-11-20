@@ -3,7 +3,7 @@
   <h1>Word for Word</h1>
   <p>Push-to-talk dictation for Android that types <strong>your exact words</strong> into any text box — no AI rewording, and you keep your normal keyboard.</p>
   <p>
-    <a href="https://play.google.com/store/apps/details?id=com.isaacweber.wordforword">
+    <a href="https://play.google.com/apps/testing/com.isaacweber.wordforword">
       <img src="docs/badge-google-play.svg" height="60" alt="Get it on Google Play">
     </a>
     &nbsp;
@@ -11,7 +11,14 @@
       <img src="docs/badge-github-releases.svg" height="60" alt="Download on GitHub Releases">
     </a>
   </p>
-  <p><sub>Android 6+ · Google Play is in testing and opens once approved · GitHub APK uses your own <a href="https://openrouter.ai">OpenRouter</a> API key</sub></p>
+  <p>
+    <strong>Google Play (early access):</strong>
+    1. <a href="https://groups.google.com/g/word-for-word-testers">Join the Google Group</a>
+    &rarr;
+    2. <a href="https://play.google.com/apps/testing/com.isaacweber.wordforword">Opt in &amp; install on Google Play</a>
+    (use the same Google account for both).
+  </p>
+  <p><sub>Android 6+ · Google Play includes 30 free minutes/month · GitHub APK uses your own <a href="https://openrouter.ai">OpenRouter</a> API key</sub></p>
 </div>
 
 ## What it does
