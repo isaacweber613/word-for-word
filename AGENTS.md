@@ -126,8 +126,9 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   The app doesn't show hours left: "it shouldn't really be shown it's going to be confusing."
 - When the free minutes run out, the app offers the subscription first; your own OpenRouter key
   stays an option, not the main suggestion.
-- Yiddish takes to the PC or its cloud copy don't count against minutes or hours (they never
-  reach this server). Only a Yiddish recording that falls back to the normal cloud model counts.
+- A yearly plan comes later: "i do want to add it in the future, maybe in 3 months from now."
+- Isaac picks the models himself (main and backups, free and paid) on a model page; agents don't
+  pick or benchmark them for him: "just leave the model picking for me."
 
 ## Testing the keyboard shortcut on an emulator
 
