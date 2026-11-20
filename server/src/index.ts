@@ -93,7 +93,8 @@ function deviceOf(request: Request): string | null {
 }
 
 export async function handle(request: Request, env: Env, usage: Usage, now = new Date(),
-                             fetcher: typeof fetch = fetch): Promise<Response> {
+                             fetcher: typeof fetch = fetch,
+                             defer?: (work: Promise<unknown>) => void): Promise<Response> {
   const url = new URL(request.url);
   const device = deviceOf(request);
   const free = Number(env.FREE_SECONDS_PER_MONTH);
@@ -136,12 +137,16 @@ export async function handle(request: Request, env: Env, usage: Usage, now = new
   });
   const text = await upstream.text();
   // Only audio that came back as text counts against the free minutes.
-  if (upstream.ok) await usage.add(device, month, audioSeconds(text, audio, format));
+  // The count is saved after the answer goes back (defer), so the phone doesn't wait for it.
+  if (upstream.ok) {
+    const saving = usage.add(device, month, audioSeconds(text, audio, format));
+    if (defer) defer(saving); else await saving;
+  }
   return new Response(text, { status: upstream.status, headers: { "Content-Type": "application/json" } });
 }
 
 export default {
-  fetch(request: Request, env: Env): Promise<Response> {
-    return handle(request, env, d1Usage(env.DB));
+  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    return handle(request, env, d1Usage(env.DB), new Date(), fetch, p => ctx.waitUntil(p));
   },
 } satisfies ExportedHandler<Env>;
