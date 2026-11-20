@@ -16,8 +16,31 @@ BT=$(ls -d "$SDK/build-tools/"* | tail -1)
 # Releases so far are signed with the debug key; a different key can't install over them.
 KS="$HOME/.android/debug.keystore"
 
+# The after-stop speed test (app/src/androidTest, AfterStopSpeedTest) runs on an emulator and blocks
+# the release if text would come back slower after the stop. Uses a running emulator, or boots one
+# hidden (WFW_AVD) after the builds and shuts down only that one. Booting it during the builds ran
+# this PC out of memory twice on 2026-11-20.
 ./gradlew testBrowserDebugUnitTest testSelfInstallDebugUnitTest \
   assembleBrowserRelease assembleSelfInstallRelease -q
+
+ADB="$SDK/platform-tools/adb.exe"; [ -e "$ADB" ] || ADB="$SDK/platform-tools/adb"
+SERIAL=$("$ADB" devices | awk '/^emulator-/ && $2 == "device" { print $1; exit }')
+STARTED=""
+if [ -z "$SERIAL" ]; then
+  SERIAL=emulator-5584
+  "$SDK/emulator/emulator" -avd "${WFW_AVD:-FlashDim_Pixel_10_Pro_XL_API_37}" -port 5584 \
+    -no-window -no-boot-anim -no-snapshot-save >/dev/null 2>&1 &
+  STARTED=$!
+  trap '"$ADB" -s "$SERIAL" emu kill >/dev/null 2>&1 || true' EXIT
+fi
+
+until [ "$("$ADB" -s "$SERIAL" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do
+  if [ -n "$STARTED" ] && ! kill -0 "$STARTED" 2>/dev/null; then echo "The emulator didn't start" >&2; exit 1; fi
+  sleep 2
+done
+ANDROID_SERIAL=$SERIAL ./gradlew connectedPlayDebugAndroidTest -q
+"$ADB" -s "$SERIAL" logcat -d -s AfterStopSpeed:I | grep -v "Body fully" | tail -3
+if [ -n "$STARTED" ]; then "$ADB" -s "$SERIAL" emu kill >/dev/null 2>&1 || true; trap - EXIT; fi
 
 sign() { # <variant folder> <output>
   local tmp; tmp=$(mktemp)

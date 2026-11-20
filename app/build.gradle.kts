@@ -23,6 +23,9 @@ android {
         versionName = "0.9.9"
 
         ndk { abiFilters += "arm64-v8a" }
+
+        // Instrumented tests (app/src/androidTest), run by scripts/release.sh on an emulator.
+        testInstrumentationRunner = "com.kafkasl.phonewhisper.TestRunner"
     }
 
     buildFeatures { buildConfig = true }
@@ -109,4 +112,7 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
+
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
 }

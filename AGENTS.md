@@ -31,6 +31,14 @@ the before and after sizes and wait for his OK.
 
 Each build's updater looks only for its own APK name in the latest release.
 
+Isaac (2026-11-20): "can you make a test, some better if it's like automatic test that would block
+any regressions in this speed?" `release.sh` also runs `AfterStopSpeedTest` (`app/src/androidTest`)
+with `connectedPlayDebugAndroidTest` on an emulator, and stops the release if it fails. It feeds a
+15 s speech clip at real-time pace the way the recorder does, then checks that compressing after
+the stop, and the whole phone-side path from the stop to the upload starting, each take under
+50 ms (Isaac's limit), and that the upload is valid Ogg Opus. It uses a running emulator, or boots `WFW_AVD` (default
+`FlashDim_Pixel_10_Pro_XL_API_37`) hidden after the builds and shuts down only that one.
+
 ## Play Protect and the in-app installer
 
 Isaac (2026-11-06): 0.6.7 to 0.7.0 asked for `REQUEST_INSTALL_PACKAGES` so the app could install
@@ -101,7 +109,8 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
 - Since 0.9.9 dictation compresses while recording (`OggOpus.Stream`) and opens the upload
   connection when recording starts (`CloudTranscription.warm`). In 0.9.7 and 0.9.8, compressing
   after the stop took about 7 s for a 12.5 s recording on Isaac's Pixel. Isaac's target for the
-  after-stop compression is under 100 ms; 0.9.9 measured 24 ms for 13.6 s on the emulator.
+  after-stop compression was under 100 ms, then under 50 ms (2026-11-20, now a release test, see
+  Releasing); 0.9.9 measured 24 ms for 13.6 s on the emulator.
   Agent-device snapshots switch the app's accessibility service off on the emulator, because
   its UI automation helper suppresses other services. Tap with `adb shell input tap` while
   testing the mic button.

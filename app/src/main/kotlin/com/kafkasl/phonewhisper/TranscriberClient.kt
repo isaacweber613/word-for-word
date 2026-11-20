@@ -121,6 +121,10 @@ object TranscriberClient {
     fun summaryFor(id: String) = CLOUD_MODELS.firstOrNull { it.id == id }
         ?.let { "${it.title} · ${it.price}" } ?: "Custom: $id"
 
+    // Where recordings go. The speed test (androidTest) points these at a server on the phone.
+    internal var serverUrl = BuildConfig.SERVICE_URL + "/v1/transcriptions"
+    internal var openRouterUrl = "https://openrouter.ai/api/v1/audio/transcriptions"
+
     private val client = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(70, TimeUnit.SECONDS)
@@ -187,8 +191,7 @@ object TranscriberClient {
      * the recording is (see CloudTranscription.warm). The answer, often 404, is ignored.
      */
     fun warm(viaServer: Boolean) {
-        val url = if (viaServer) BuildConfig.SERVICE_URL + "/v1/transcriptions"
-                  else "https://openrouter.ai/api/v1/audio/transcriptions"
+        val url = if (viaServer) serverUrl else openRouterUrl
         client.newCall(Request.Builder().url(url).head().build()).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {}
             override fun onResponse(call: Call, response: Response) = response.close()
@@ -204,9 +207,9 @@ object TranscriberClient {
         val viaServer = deviceId != null
         val builder = Request.Builder()
         if (viaServer) {
-            builder.url(BuildConfig.SERVICE_URL + "/v1/transcriptions").header("X-Device-Id", deviceId!!)
+            builder.url(serverUrl).header("X-Device-Id", deviceId!!)
         } else {
-            builder.url("https://openrouter.ai/api/v1/audio/transcriptions")
+            builder.url(openRouterUrl)
                 .header("Authorization", "Bearer $apiKey")
                 .header("X-Title", "Word for Word")
         }
