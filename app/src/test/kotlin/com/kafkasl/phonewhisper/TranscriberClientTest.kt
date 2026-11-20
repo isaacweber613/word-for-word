@@ -82,4 +82,12 @@ class TranscriberClientTest {
         val body = TranscriberClient.buildBodyJson("", "openai/gpt-transcribe", false)
         assertFalse(body.has("provider"))
     }
+
+    @Test fun `out of free minutes offers the subscription, not an OpenRouter key`() {
+        val m = TranscriberClient.serverError(402, """{"error":{"message":"x","code":"free_minutes_used"}}""", "x", "m")
+        assertEquals(FreeMinutes.OUT_FREE, m)
+        assertFalse(m.contains("OpenRouter"))
+        assertEquals(FreeMinutes.OUT_HOURS,
+            TranscriberClient.serverError(402, """{"error":{"message":"x","code":"hours_used"}}""", "x", "m"))
+    }
 }

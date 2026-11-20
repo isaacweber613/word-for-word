@@ -1,6 +1,6 @@
 # Privacy policy for Word for Word
 
-Last updated: November 11, 2026. Developer: Isaac Weber.
+Last updated: November 20, 2026. Developer: Isaac Weber.
 
 Word for Word is an Android dictation app. You tap a floating button, speak, and the app types your exact words into the text box you're in.
 
@@ -9,6 +9,8 @@ Word for Word is an Android dictation app. You tap a floating button, speak, and
 Tapping the floating button records audio until you tap again. With your own API key, the app sends the recording directly from your phone to OpenRouter. OpenRouter passes the audio to the speech-to-text model you picked. In the Play Store build, if you have not entered a key, the recording goes through Word for Word's server (a Cloudflare Worker), which passes it to OpenRouter. That server processes the recording in transit and does not store the recording or transcription in its database.
 
 For free minutes, the app also sends a SHA-256 hash of its Android device ID. The server stores that hash, the UTC calendar month, and seconds used in a Cloudflare D1 database to enforce the monthly allowance. The hash can stay the same after reinstalling the app. These records currently have no automatic deletion schedule.
+
+If you subscribe or buy extra hours in the Play Store build, Google Play takes the payment. The app sends the purchase token Google Play gives it to Word for Word's server, with the same device hash. The server checks the purchase with Google and stores the token, the product, when the paid month ends, the hash of each phone it is used on, and the time used and left. Word for Word never receives your card details, name or Google account.
 
 When you share an audio or video file to Word for Word from another app, the app takes its sound on your phone and sends it the same way as a recording. The text is copied to your clipboard and saved in History.
 

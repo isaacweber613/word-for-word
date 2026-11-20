@@ -71,12 +71,34 @@ object CloudTranscription {
             }
         }
 
-        fun done(text: String, used: String) {
+        fun done(text: String, used: String, picked: String = model) {
             Analytics.track("transcribed", mapOf("model" to used, "seconds" to seconds,
-                "backup_model" to (used != model), "free_minutes" to (deviceId != null),
+                "backup_model" to (used != picked), "free_minutes" to (deviceId != null),
                 // How long the phone took to shrink the recording before uploading it.
                 "compress_ms" to compressMs))
-            callback(Outcome(text, used, model.takeIf { it != used }, null))
+            callback(Outcome(text, used, picked.takeIf { it != used }, null))
+        }
+
+        // Through Word for Word's server (free minutes or the subscription), the server picks the
+        // model and tries its backups itself (Isaac's Models page). When the server says nothing is
+        // left, the phone's Google Play purchases are sent again once, in case the subscription just
+        // renewed or was bought on another phone, and the recording goes again if time is left.
+        fun viaServer(result: TranscriberClient.Result, retried: Boolean) {
+            if (!result.text.isNullOrBlank()) {
+                FreeMinutes.remember(context, out = false)
+                done(result.text, result.servedBy ?: model, result.servedBy ?: model)
+            } else if (result.errorCode == "free_minutes_used" || result.errorCode == "hours_used") {
+                FreeMinutes.remember(context, out = true)
+                if (Billing.available && !retried) {
+                    Billing.sync(context) { left ->
+                        if (left) send(model) { viaServer(it, true) } else callback(Outcome(null, model, null, result))
+                    }
+                } else {
+                    callback(Outcome(null, model, null, result))
+                }
+            } else {
+                callback(Outcome(null, result.servedBy ?: model, null, result))
+            }
         }
 
         // Compressing takes a moment, so it runs off the main thread; replies already come on OkHttp's.
@@ -85,22 +107,24 @@ object CloudTranscription {
             ogg = stream?.finish() ?: OggOpus.encode(wav)
             compressMs = (System.nanoTime() - t) / 1_000_000
             Log.i(TAG, "Compressed ${wav.size} bytes to ${ogg?.size ?: 0} in $compressMs ms")
+            if (deviceId != null) { send(model) { viaServer(it, false) }; return@thread }
             send(model) { result ->
-            if (!result.text.isNullOrBlank()) {
-                done(result.text, model)
-            } else if (TranscriberClient.shouldTryAnotherModel(result.code, result.detail)) {
-                // The chosen model is busy or down: send the same recording to another model right away.
-                val backup = TranscriberClient.fallbackFor(model)
-                Log.i(TAG, "$model failed (${result.code}), trying $backup")
-                send(backup) { second ->
-                    Log.i(TAG, "$backup answered: ${if (!second.text.isNullOrBlank()) "text" else second.code?.let { "error $it" } ?: "no text"}")
-                    if (!second.text.isNullOrBlank()) done(second.text, backup)
-                    else callback(Outcome(null, model, null, if (second.error == null && second.text != null) second else result))
+                if (!result.text.isNullOrBlank()) {
+                    done(result.text, model)
+                } else if (TranscriberClient.shouldTryAnotherModel(result.code, result.detail)) {
+                    // The chosen model is busy or down: send the same recording to another model right away.
+                    val backup = TranscriberClient.fallbackFor(model)
+                    Log.i(TAG, "$model failed (${result.code}), trying $backup")
+                    send(backup) { second ->
+                        Log.i(TAG, "$backup answered: ${if (!second.text.isNullOrBlank()) "text" else second.code?.let { "error $it" } ?: "no text"}")
+                        if (!second.text.isNullOrBlank()) done(second.text, backup)
+                        else callback(Outcome(null, model, null, if (second.error == null && second.text != null) second else result))
+                    }
+                } else {
+                    callback(Outcome(null, model, null, result))
                 }
-            } else {
-                callback(Outcome(null, model, null, result))
             }
-        } }
+        }
     }
 
     /** Counts a failed transcription. True when the model answered but heard no words. */

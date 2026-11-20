@@ -17,7 +17,11 @@ object TranscriberClient {
      * [code] and [detail] are OpenRouter's HTTP status and own error text for a failed answer;
      * null for success or no connection.
      */
-    data class Result(val text: String?, val error: String?, val code: Int? = null, val detail: String? = null)
+    data class Result(val text: String?, val error: String?, val code: Int? = null, val detail: String? = null,
+                      /** Word for Word's server's own error code, like "free_minutes_used". */
+                      val errorCode: String? = null,
+                      /** The model Word for Word's server picked and that answered (its X-Model header). */
+                      val servedBy: String? = null)
     data class CloudModel(
         val id: String,
         val name: String,
@@ -230,12 +234,13 @@ object TranscriberClient {
                     // The model refused the language: send again and let it guess.
                     transcribe(wavData, apiKey, model, verbatim, "auto", deviceId, format, callback)
                 } else if (response.isSuccessful) {
-                    callback(parseResponse(body))
+                    callback(parseResponse(body).copy(servedBy = response.header("X-Model")))
                 } else {
                     val detail = parseResponse(body).error
                     val message = if (viaServer) serverError(response.code, body, detail, model)
                                   else httpError(response.code, detail, model)
-                    callback(Result(null, message, response.code, detail))
+                    val errorCode = try { JSONObject(body).getJSONObject("error").optString("code") } catch (e: Exception) { "" }
+                    callback(Result(null, message, response.code, detail, errorCode.ifBlank { null }, response.header("X-Model")))
                 }
             }
         })
@@ -251,8 +256,9 @@ object TranscriberClient {
     fun serverError(code: Int, body: String, detail: String?, model: String): String {
         val errorCode = try { JSONObject(body).getJSONObject("error").optString("code") } catch (e: Exception) { "" }
         return when {
-            errorCode == "free_minutes_used" ->
-                "You've used this month's free minutes. To keep going now, add your own OpenRouter key in Word for Word."
+            // The paid plan comes first (Isaac, 2026-11-20); your own key stays an option in Settings.
+            errorCode == "free_minutes_used" -> FreeMinutes.OUT_FREE
+            errorCode == "hours_used" -> FreeMinutes.OUT_HOURS
             // The server's OpenRouter key reached its monthly spending limit.
             code == 402 || code == 401 || code == 403 ->
                 "Free minutes are paused right now. Try again later, or add your own OpenRouter key in Word for Word."

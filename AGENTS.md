@@ -115,9 +115,26 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   its UI automation helper suppresses other services. Tap with `adb shell input tap` while
   testing the mic button.
 - Deploy: `cd server && npm test && npx wrangler deploy`.
-- Paid plans (Play Billing) aren't built yet; they need Isaac's Play Console account.
+- The server picks the model (2026-11-20): the main model and up to two backups, separately for
+  free and paying phones, from its D1 table `models`. Isaac sets them on yiddishvoicetotext.com,
+  Models tab (that site's `site/src/models.js` writes this database). The app's model in the body
+  is ignored; the answer's `X-Model` header names the model that typed it.
+- Everything is counted in plan seconds: a second of audio on a $0.10-an-hour model. The server
+  takes OpenRouter's `usage.cost` per recording and divides by $0.10 an hour, so a pricier model
+  uses the minutes and hours up faster and no model choice loses money.
+- `POST /v1/purchases` checks a Play purchase with the Android Publisher API as the service account
+  `play-purchases@word-for-word-515315.iam.gserviceaccount.com` (Google Cloud project "Word for
+  Word"; Play Console gave it "View financial data" on 2026-11-20). Its JSON key is only the
+  Worker secret `GOOGLE_SERVICE_ACCOUNT`.
 
-## Paid plan (agreed with Isaac 2026-11-20, not built yet)
+## Paid plan (agreed with Isaac 2026-11-20, built the same day, not on sale yet)
+
+Built: the server above, `Billing.kt` in the Play build (`src/play`; the GitHub builds get the
+stand-in in `src/github`), the Settings row "Subscribe" / "Subscribed", and the out-of-minutes
+messages (`FreeMinutes.OUT_FREE`, `OUT_HOURS`). Not on sale until Play Console has a payments
+profile (Monetize needs a Google Payments merchant account, which needs Isaac's business and bank
+details) and the products exist: subscription `monthly` ($3, base plan monthly) and one-time
+product `extra_hours_4` ($1).
 
 - One subscription: $3 a month for 10 hours of transcription a month. No yearly plan.
 - Extra hours: $1 for 4 hours. They never expire, but work only while the $3 subscription is

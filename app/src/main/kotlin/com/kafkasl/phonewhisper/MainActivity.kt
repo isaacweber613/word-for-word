@@ -53,6 +53,9 @@ class MainActivity : AppCompatActivity() {
         if (uri != null) importSettings(uri)
     }
     private lateinit var keyRowSub: TextView
+    private lateinit var planRow: LinearLayout
+    private lateinit var planRowTitle: TextView
+    private lateinit var planRowSub: TextView
     private lateinit var cloudModelRow: LinearLayout
     private lateinit var cloudModelRowSub: TextView
     private lateinit var verbatimRow: LinearLayout
@@ -220,6 +223,14 @@ class MainActivity : AppCompatActivity() {
         // --- Settings Section ---
         root.addView(sectionHeader("Settings"))
         
+        // The paid plan, Play build only (Isaac, 2026-11-20): subscribe, then add hours or manage it.
+        // No count of hours left: "it shouldn't really be shown it's going to be confusing."
+        planRow = settingsRow("Subscribe", "") { onPlanTap() }
+        planRowTitle = planRow.findViewWithTag("title")
+        planRowSub = planRow.findViewWithTag("subtitle")
+        planRow.visibility = if (Billing.available) View.VISIBLE else View.GONE
+        root.addView(planRow)
+
         val keyRow = settingsRow("OpenRouter API Key", "Tap to set") { promptApiKey() }
         keyRowSub = keyRow.findViewWithTag("subtitle")
         root.addView(keyRow)
@@ -319,6 +330,8 @@ class MainActivity : AppCompatActivity() {
 
         // The setup walkthrough (maybeRunSetup) asks for the microphone, so no request here.
         refresh()
+        // A subscription bought on another phone, or a month that renewed, reaches the server.
+        if (Billing.available && FreeMinutes.inUse(this)) Billing.sync(this) { runOnUiThread { if (!isFinishing) refresh() } }
     }
 
     override fun onResume() {
@@ -486,7 +499,27 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
 
-    // --- Free minutes (Play build) ---
+    // --- Free minutes and the paid plan (Play build) ---
+
+    private fun onPlanTap() {
+        val done: (String?) -> Unit = { message ->
+            runOnUiThread {
+                if (message != null && !isFinishing) {
+                    android.app.AlertDialog.Builder(this).setMessage(message).setPositiveButton("OK", null).show()
+                }
+                loadFreeMinutes()
+                refresh()
+            }
+        }
+        if (!FreeMinutes.subscribed(this)) { Billing.subscribe(this, done); return }
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Subscription")
+            .setItems(arrayOf("Add 4 hours for \$1", "Manage subscription")) { _, which ->
+                if (which == 0) Billing.buyHours(this, done) else Billing.manage(this)
+            }
+            .setNegativeButton("Close", null)
+            .show()
+    }
 
     private var freeMinutesText = "Optional. Without a key you get free minutes each month"
 
@@ -800,7 +833,19 @@ class MainActivity : AppCompatActivity() {
         promptRow.visibility = if (usePostProcessing) View.VISIBLE else View.GONE
 
         val apiKey = prefs().getString("api_key", "") ?: ""
-        keyRowSub.text = if (apiKey.isBlank() && FreeMinutes.available) freeMinutesText
+        if (Billing.available) {
+            val subscribed = FreeMinutes.subscribed(this)
+            val out = FreeMinutes.out(this)
+            planRowTitle.text = if (subscribed) "Subscribed" else "Subscribe"
+            planRowSub.text = when {
+                subscribed && out -> "This month's hours are used. Tap to add 4 hours for \$1"
+                subscribed -> "Tap to add 4 hours for \$1, or manage the subscription"
+                out -> "This month's free minutes are used. 10 hours a month for \$3"
+                else -> "10 hours of dictation a month for \$3"
+            }
+        }
+        keyRowSub.text = if (apiKey.isBlank() && FreeMinutes.available && FreeMinutes.subscribed(this)) "Optional"
+                         else if (apiKey.isBlank() && FreeMinutes.available) freeMinutesText
                          else if (apiKey.isBlank()) "Tap to set" 
                          else if (apiKey.length > 7) "${apiKey.take(6)}...${apiKey.takeLast(4)}" 
                          else "Set"
@@ -1249,6 +1294,7 @@ class MainActivity : AppCompatActivity() {
         }
         
         textContainer.addView(TextView(this).apply {
+            tag = "title"
             text = title
             textSize = 18f
             setTextColor(attrColor(android.R.attr.textColorPrimary))

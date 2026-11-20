@@ -759,6 +759,8 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun startRecording(via: String, yiddish: Boolean = false) {
         if (yiddish && YiddishServer.needsConsent(prefs())) { askYiddishConsent(via); return }
+        // Uses the same minutes and hours as other recordings (AGENTS.local.md).
+        if (yiddish && FreeMinutes.inUse(this) && FreeMinutes.out(this)) { toast(FreeMinutes.outMessage(this)); return }
         if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
             != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             toast("Microphone permission is off. Open Word for Word to turn it on."); return
@@ -845,6 +847,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         YiddishServer.transcribe(WavWriter.encode(pcm), appVersion, install) { result ->
             if (!result.text.isNullOrBlank()) {
                 Analytics.track("transcribed", mapOf("model" to "yiddish-pc", "seconds" to seconds, "backup_model" to false, "free_minutes" to false))
+                FreeMinutes.countElsewhere(this, seconds, YiddishServer.WEIGHT)
                 handleTranscriptionResult(result.text, "yiddish-pc")
             } else if (YiddishServer.isOff(result)) {
                 yiddishTake = false

@@ -27,6 +27,9 @@ object YiddishServer {
     fun enabled(p: SharedPreferences) =
         p.getString("language", "auto") == "yi"
 
+    /** How much a take here counts against the Play build's minutes and hours (AGENTS.local.md). */
+    const val WEIGHT = 2.0
+
     /** Pref: the person agreed to [DISCLOSURE]. */
     const val CONSENT = "yiddish_training_consent"
     const val DISCLOSURE = "Yiddish mode sends your recording through Cloudflare to a speech model on the developer's PC. " +
