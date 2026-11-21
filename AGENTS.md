@@ -128,14 +128,18 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   Word"; Play Console gave it "View financial data" on 2026-11-20). Its JSON key is only the
   Worker secret `GOOGLE_SERVICE_ACCOUNT`.
 
-## Paid plan (agreed with Isaac 2026-11-20, built the same day, not on sale yet)
+## Paid plan (agreed with Isaac 2026-11-20, built the same day)
+
+2026-11-21: Isaac set up the payments profile (statement name WORD FOR WORD, support email
+micromaxpro7@gmail.com). 0.9.10 (versionCode 47, the first build with billing) is on the internal
+testing track; closed testing still has 0.9.9. Both products are Active: subscription `monthly`
+(base plan `monthly`, auto-renewing) and one-time `extra_hours_4` (purchase option `buy`). Google's
+price rounding made them US$2.99 and US$0.99. The account is a non-trader and the app isn't offered
+in the EEA or UK; keep it that way while it sells anything.
 
 Built: the server above, `Billing.kt` in the Play build (`src/play`; the GitHub builds get the
 stand-in in `src/github`), the Settings row "Subscribe" / "Subscribed", and the out-of-minutes
-messages (`FreeMinutes.OUT_FREE`, `OUT_HOURS`). Not on sale until Play Console has a payments
-profile (Monetize needs a Google Payments merchant account, which needs Isaac's business and bank
-details) and the products exist: subscription `monthly` ($3, base plan monthly) and one-time
-product `extra_hours_4` ($1). Isaac (2026-11-20): "ok i will set that up when i have time."
+messages (`FreeMinutes.OUT_FREE`, `OUT_HOURS`).
 Paid hours count 1:1 on any model up to $0.15 an hour and faster above it (free minutes: $0.10):
 "i think i can afford up to 15 cents per hour still gives 10 hours a month".
 
