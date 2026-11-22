@@ -284,6 +284,10 @@ class WhisperAccessibilityService : AccessibilityService() {
         val show = if (shortcut != null) busy || state == State.RETRY || showingPasteFailure
                    else busy || textBox
         val wasShown = overlay.visibility == View.VISIBLE
+        // Move to this app's own spot as it shows, or when you switch apps while it's idle.
+        if (show && (!wasShown || !busy)) {
+            activeAppPackage()?.takeIf { it != positionedFor }?.let { placeFor(it, params) }
+        }
         if (show == wasShown) return
         overlay.visibility = if (show) View.VISIBLE else View.GONE
         // A hidden window still catches taps unless it's marked not touchable.
@@ -293,6 +297,49 @@ class WhisperAccessibilityService : AccessibilityService() {
             (getSystemService(WINDOW_SERVICE) as WindowManager).updateViewLayout(overlay, params)
         } catch (e: Exception) {
             Log.w(TAG, "Couldn't update overlay visibility", e)
+        }
+    }
+
+    // --- Each app remembers where you put the button (Isaac, 2026-11-22) ---
+
+    /** The app whose spot the button is in now. */
+    private var positionedFor: String? = null
+
+    private fun positions() = getSharedPreferences("button_positions", MODE_PRIVATE)
+
+    /** Puts the button where you last left it in [pkg], or on the right halfway down if you never moved it there. */
+    private fun placeFor(pkg: String, params: WindowManager.LayoutParams) {
+        val ringSize = (RING_DP * dp).toInt()
+        val margin = (MARGIN_DP * dp).toInt()
+        // Saved as "L" or "R" and the button's center as a share of the screen height, so it fits after rotating.
+        val saved = positions().getString(pkg, null)?.split(',')
+        val centerY = saved?.getOrNull(1)?.toFloatOrNull()
+        params.x = if (saved?.getOrNull(0) == "L") margin else screenW - ringSize - margin
+        params.y = if (centerY == null) screenH / 2 - ringSize / 2
+                   else (centerY * screenH - ringSize / 2).toInt().coerceIn(0, maxOf(0, screenH - ringSize))
+        positionedFor = pkg
+        moveButton(params)
+    }
+
+    private fun savePosition(pkg: String, params: WindowManager.LayoutParams) {
+        val ringSize = (RING_DP * dp).toInt()
+        val side = if (params.x + ringSize / 2 > screenW / 2) "R" else "L"
+        positions().edit().putString(pkg, "$side,${(params.y + ringSize / 2f) / screenH}").apply()
+        positionedFor = pkg
+    }
+
+    private fun moveButton(params: WindowManager.LayoutParams) {
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        try {
+            overlayView?.let { wm.updateViewLayout(it, params) }
+            val fp = feedbackLayoutParams
+            val fv = feedbackView
+            if (fp != null && fv != null) {
+                positionFeedback(fp, params)
+                wm.updateViewLayout(fv, fp)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Couldn't move the button", e)
         }
     }
 
@@ -491,6 +538,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                             positionFeedback(it, params)
                             wm.updateViewLayout(feedbackView, it)
                         }
+                        activeAppPackage()?.let { savePosition(it, params) }
                     }
                     true
                 }
