@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  audioSeconds, choose, handle, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds, type Env,
+  audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds, type Env,
 } from "../src/index";
 import { DEFAULT_MODELS, type Account, type Bucket, type Models, type Store, type Sub } from "../src/store";
 
@@ -234,5 +234,79 @@ describe("transcription server", () => {
     }), { ...env, GOOGLE_SERVICE_ACCOUNT: sa }, store, now, google);
     expect(await res.json()).toEqual({ subscribed: true, out: false });
     expect(s.sub).toEqual({ token: "sub", product: "monthly", expiry: later });
+  });
+
+  describe("Play Integrity", () => {
+    const secret = "s3cret";
+    const strict = { ...env, REQUIRE_INTEGRITY: "true", DEVICE_TOKEN_SECRET: secret } as Env;
+    const good = {
+      requestDetails: { requestPackageName: "com.isaacweber.wordforword", requestHash: device, timestampMillis: "1" },
+      appIntegrity: { appRecognitionVerdict: "PLAY_RECOGNIZED", packageName: "com.isaacweber.wordforword" },
+      deviceIntegrity: { deviceRecognitionVerdict: ["MEETS_BASIC_INTEGRITY"] },
+    };
+
+    async function serviceAccount() {
+      const { generateKeyPairSync } = await import("node:crypto");
+      const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      return JSON.stringify({ client_email: "x@y", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) });
+    }
+    const google = (payload: unknown, status = 200) => (async (u: string) => u.includes("oauth2")
+      ? Response.json({ access_token: "a", expires_in: 3600 })
+      : Response.json(status === 200 ? { tokenPayloadExternal: payload } : { error: {} }, { status })) as unknown as typeof fetch;
+    const register = () => new Request("https://example.com/v1/register", {
+      method: "POST", headers: { "X-Device-Id": device }, body: JSON.stringify({ integrity_token: "itok" }),
+    });
+
+    it("accepts the Play app on a phone with basic integrity, and not less", () => {
+      expect(integrityProblem(good, device)).toBeNull();
+      expect(integrityProblem({ ...good, deviceIntegrity: { deviceRecognitionVerdict: ["MEETS_DEVICE_INTEGRITY"] } }, device)).toBeNull();
+      expect(integrityProblem({ ...good, deviceIntegrity: {} }, device)).toBe("device none");
+      expect(integrityProblem({ ...good, appIntegrity: { appRecognitionVerdict: "UNRECOGNIZED_VERSION" } }, device)).toMatch(/^app /);
+      expect(integrityProblem({ ...good, requestDetails: { ...good.requestDetails, requestHash: "b".repeat(64) } }, device))
+        .toBe("request hash doesn't match");
+      expect(integrityProblem({ ...good, requestDetails: { ...good.requestDetails, requestPackageName: "evil" } }, device)).toBe("package evil");
+      expect(integrityProblem(null, device)).toBe("token not readable");
+    });
+
+    it("gives a vouched-for phone its device token", async () => {
+      const sa = await serviceAccount();
+      const res = await handle(register(), { ...strict, GOOGLE_SERVICE_ACCOUNT: sa }, memoryStore().store, now, google(good));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ device_token: await deviceToken(secret, device) });
+    });
+
+    it("refuses a phone Google doesn't vouch for, or a token Google can't read", async () => {
+      const sa = await serviceAccount();
+      const e = { ...strict, GOOGLE_SERVICE_ACCOUNT: sa };
+      const refused = await handle(register(), e, memoryStore().store, now, google({ ...good, deviceIntegrity: {} }));
+      expect(refused.status).toBe(403);
+      expect((await refused.json() as { error: { code: string } }).error.code).toBe("device_unverified");
+      expect((await handle(register(), e, memoryStore().store, now, google(null, 400))).status).toBe(403);
+      // Google refusing this server is not the phone's fault: try again later.
+      expect((await handle(register(), e, memoryStore().store, now, google(null, 403))).status).toBe(503);
+    });
+
+    it("refuses calls without a valid device token once required", async () => {
+      const none = await handle(transcribe(5), strict, memoryStore().store, now, ok);
+      expect(none.status).toBe(426);
+      expect((await none.json() as { error: { code: string } }).error.code).toBe("device_unverified");
+      const fake = await handle(transcribe(5, {}, { "X-Device-Id": device, "X-Device-Token": "0".repeat(64) }),
+        strict, memoryStore().store, now, ok);
+      expect(fake.status).toBe(403);
+      // Another phone's token doesn't work for this device ID.
+      const other = await deviceToken(secret, "b".repeat(64));
+      expect((await handle(transcribe(5, {}, { "X-Device-Id": device, "X-Device-Token": other }),
+        strict, memoryStore().store, now, ok)).status).toBe(403);
+      const usage = await handle(new Request("https://example.com/v1/usage", { headers: { "X-Device-Id": device } }),
+        strict, memoryStore().store, now, ok);
+      expect(usage.status).toBe(426);
+    });
+
+    it("serves a call with this phone's token, and any call while not required", async () => {
+      const token = await deviceToken(secret, device);
+      expect((await handle(transcribe(5, {}, { "X-Device-Id": device, "X-Device-Token": token }),
+        strict, memoryStore().store, now, ok)).status).toBe(200);
+      expect((await handle(transcribe(5), { ...strict, REQUIRE_INTEGRITY: "false" }, memoryStore().store, now, ok)).status).toBe(200);
+    });
   });
 });

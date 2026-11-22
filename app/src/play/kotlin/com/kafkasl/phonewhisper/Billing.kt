@@ -128,10 +128,10 @@ object Billing {
      */
     private fun register(context: Context, purchase: Purchase): Boolean {
         val c = client ?: return false
+        FreeMinutes.register(context)
         for (product in purchase.products) {
             val body = JSONObject().put("product_id", product).put("purchase_token", purchase.purchaseToken).toString()
-            val request = Request.Builder().url(BuildConfig.SERVICE_URL + "/v1/purchases")
-                .header("X-Device-Id", FreeMinutes.deviceId(context))
+            val request = FreeMinutes.identify(Request.Builder().url(BuildConfig.SERVICE_URL + "/v1/purchases"), context)
                 .post(body.toRequestBody("application/json".toMediaType())).build()
             try {
                 http.newCall(request).execute().use { r ->

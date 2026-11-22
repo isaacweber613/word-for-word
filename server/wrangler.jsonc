@@ -8,7 +8,11 @@
   ],
   "vars": {
     // 30 free minutes per phone per month (Isaac, 2026-11-06).
-    "FREE_SECONDS_PER_MONTH": "1800"
+    "FREE_SECONDS_PER_MONTH": "1800",
+    // "true": every call needs a device token from Play Integrity (POST /v1/register). Turned on
+    // only once the first build that registers (0.9.11) is on every testing track.
+    "REQUIRE_INTEGRITY": "false"
   }
   // Secret, set with `wrangler secret put OPENROUTER_KEY`: an OpenRouter key with a $10 monthly limit.
+  // Also GOOGLE_SERVICE_ACCOUNT (the service account's JSON key) and DEVICE_TOKEN_SECRET (random).
 }

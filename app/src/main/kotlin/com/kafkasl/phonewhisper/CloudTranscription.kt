@@ -36,6 +36,8 @@ object CloudTranscription {
      */
     fun warm(context: Context) {
         if (ready(context)) TranscriberClient.warm(viaServer = FreeMinutes.inUse(context))
+        // A phone with no device token yet gets one while the person speaks.
+        FreeMinutes.registerSoon(context)
     }
 
     /**
@@ -61,12 +63,13 @@ object CloudTranscription {
         val builtIn = TranscriberClient.CLOUD_MODELS.map { it.id }.toSet()
         var ogg: ByteArray? = null
         var compressMs = 0L
+        var deviceToken: String? = null
         fun sendWav(m: String, cb: (TranscriberClient.Result) -> Unit) =
-            TranscriberClient.transcribe(wav, apiKey, m, verbatim, language, deviceId, "wav", cb)
+            TranscriberClient.transcribe(wav, apiKey, m, verbatim, language, deviceId, "wav", deviceToken, cb)
         fun send(m: String, cb: (TranscriberClient.Result) -> Unit) {
             val small = ogg
             if (small == null || m !in builtIn) return sendWav(m, cb)
-            TranscriberClient.transcribe(small, apiKey, m, verbatim, language, deviceId, "ogg") { r ->
+            TranscriberClient.transcribe(small, apiKey, m, verbatim, language, deviceId, "ogg", deviceToken) { r ->
                 if (r.code == 400) { Log.i(TAG, "$m refused Ogg audio; sending WAV"); sendWav(m, cb) } else cb(r)
             }
         }
@@ -84,7 +87,13 @@ object CloudTranscription {
         // left, the phone's Google Play purchases are sent again once, in case the subscription just
         // renewed or was bought on another phone, and the recording goes again if time is left.
         fun viaServer(result: TranscriberClient.Result, retried: Boolean) {
-            if (!result.text.isNullOrBlank()) {
+            if (result.errorCode == "device_unverified" && !retried) {
+                // The server no longer takes this phone's device token: ask Google Play again, once.
+                thread {
+                    deviceToken = FreeMinutes.register(context, again = true)
+                    if (deviceToken != null) send(model) { viaServer(it, true) } else callback(Outcome(null, model, null, result))
+                }
+            } else if (!result.text.isNullOrBlank()) {
                 FreeMinutes.remember(context, out = false)
                 done(result.text, result.servedBy ?: model, result.servedBy ?: model)
             } else if (result.errorCode == "free_minutes_used" || result.errorCode == "hours_used") {
@@ -107,7 +116,12 @@ object CloudTranscription {
             ogg = stream?.finish() ?: OggOpus.encode(wav)
             compressMs = (System.nanoTime() - t) / 1_000_000
             Log.i(TAG, "Compressed ${wav.size} bytes to ${ogg?.size ?: 0} in $compressMs ms")
-            if (deviceId != null) { send(model) { viaServer(it, false) }; return@thread }
+            if (deviceId != null) {
+                // Usually saved long ago; only the first recording on a phone waits for Google Play here.
+                deviceToken = FreeMinutes.register(context)
+                send(model) { viaServer(it, false) }
+                return@thread
+            }
             send(model) { result ->
                 if (!result.text.isNullOrBlank()) {
                     done(result.text, model)

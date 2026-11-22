@@ -19,8 +19,8 @@ android {
         applicationId = "com.isaacweber.wordforword"
         minSdk = 23
         targetSdk = 36
-        versionCode = 47
-        versionName = "0.9.10"
+        versionCode = 48
+        versionName = "0.9.11"
 
         ndk { abiFilters += "arm64-v8a" }
 
@@ -115,6 +115,8 @@ dependencies {
     implementation("com.posthog:posthog-android:3.76.1")
     // Google Play Billing, for the $3 subscription and $1 hours (Billing.kt). Play build only.
     "playImplementation"("com.android.billingclient:billing:9.1.0")
+    // Google Play Integrity, so the free-minutes server serves only the Play app (Integrity.kt). Play build only.
+    "playImplementation"("com.google.android.play:integrity:1.6.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")

@@ -99,8 +99,20 @@ holds an OpenRouter key, counts each phone's seconds in the D1 database `word-fo
 answers like OpenRouter. GitHub builds have no server URL and always need the person's own key.
 
 - The OpenRouter key "Word for Word server" has a $10 monthly limit (Isaac's choice) that caps
-  total cost, since a faked device ID could get extra free minutes until Play purchases and
-  Play Integrity checks are added. It's stored only as the Worker secret `OPENROUTER_KEY`.
+  total cost even if someone fakes many phones. It's stored only as the Worker secret `OPENROUTER_KEY`.
+- Play Integrity (Isaac, 2026-11-22, built in 0.9.11): the app is open source, so before this anyone
+  could script made-up device IDs from a computer and get free minutes forever. Once per install the
+  Play build asks Google Play Integrity (`src/play/.../Integrity.kt`, standard request, request hash =
+  the device ID) to vouch for it and sends the token to `POST /v1/register`; the server decodes it
+  as the service account and answers a device token, an HMAC of the device ID with the Worker secret
+  `DEVICE_TOKEN_SECRET`. The app sends it as `X-Device-Token` on every server call
+  (`FreeMinutes.register`, `identify`). Isaac chose the weakest device check: the app must be
+  `PLAY_RECOGNIZED` and the phone must have `MEETS_BASIC_INTEGRITY` (turned on in Play Console,
+  Protected with Play, Play Integrity API), so GrapheneOS and rooted phones still work. Google
+  Cloud project "Word for Word" (number 384040985984) is linked there; quota is 10,000 a day, free.
+  Debug builds and sideloaded copies are never vouched for. The server only refuses calls without
+  a valid token while `REQUIRE_INTEGRITY` in `server/wrangler.jsonc` is "true"; turn it on only once
+  every testing track has 0.9.11 or later, since older builds send no token.
 - Free minutes per month: `FREE_SECONDS_PER_MONTH` in `server/wrangler.jsonc`.
 - Since 0.9.7 (Isaac, 2026-11-19: "It should be as fast as possible") cloud recordings upload as
   Ogg Opus, about 12 times smaller than WAV (`OggOpus.kt`, Android 10+). The app writes the Ogg

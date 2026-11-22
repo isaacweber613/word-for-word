@@ -51,5 +51,7 @@ class WordForWordApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Analytics.init(this)
+        // Once per install, Google Play vouches for this phone to the free-minutes server.
+        FreeMinutes.registerSoon(this)
     }
 }

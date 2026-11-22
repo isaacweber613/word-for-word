@@ -16,7 +16,16 @@
  * The OpenRouter key has its own monthly spending limit set on openrouter.ai, which caps the
  * total cost even if someone fakes many phones.
  *
+ * Only the real Play app may use it (Isaac, 2026-11-22): the app is open source, so anyone could
+ * otherwise send made-up device IDs from a computer and get free minutes forever. Once per install
+ * the app asks Google Play Integrity to vouch for it (POST /v1/register) and gets a device token
+ * back, which it sends as X-Device-Token on every other call. Isaac chose the weakest device check:
+ * the app must be Play's own build and the phone must pass basic integrity, so GrapheneOS and
+ * rooted phones still work. While REQUIRE_INTEGRITY isn't "true", calls without a token still work.
+ *
  * Endpoints (all with header X-Device-Id):
+ *   POST /v1/register        {"integrity_token"}: a Play Integrity token whose request hash is the
+ *                            device ID. Answers {"device_token"}, or 403 code device_unverified.
  *   POST /v1/transcriptions  same JSON body as OpenRouter's /api/v1/audio/transcriptions. The
  *                            body's model is ignored. Answers like OpenRouter, with X-Model.
  *   GET  /v1/usage           {"used_seconds", "free_seconds", "month", "subscribed", "out"}
@@ -25,7 +34,7 @@
  *                            and count. Answers {"subscribed", "out"}.
  */
 
-import { verify, type Verified } from "./google";
+import { decodeIntegrity, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
 import { d1Store, type Account, type Bucket, type ModelChoice, type Store } from "./store";
 
 export interface Env {
@@ -34,6 +43,10 @@ export interface Env {
   FREE_SECONDS_PER_MONTH: string;
   /** The JSON key of the Google service account that may read this app's Play orders. */
   GOOGLE_SERVICE_ACCOUNT?: string;
+  /** The secret device tokens are made with (HMAC of the device ID). */
+  DEVICE_TOKEN_SECRET?: string;
+  /** "true" once every call must carry a device token from /v1/register. */
+  REQUIRE_INTEGRITY?: string;
 }
 
 /** The Play products (Play Console, Monetize). */
@@ -125,6 +138,54 @@ function deviceOf(request: Request): string | null {
   return /^[0-9a-f]{64}$/.test(id) ? id : null;
 }
 
+/** Device labels that pass: basic integrity is enough (Isaac, 2026-11-22); the stronger ones include it. */
+const DEVICE_LABELS = ["MEETS_BASIC_INTEGRITY", "MEETS_DEVICE_INTEGRITY", "MEETS_STRONG_INTEGRITY"];
+
+/**
+ * Why a decoded Play Integrity verdict doesn't vouch for [device], or null when it does: it must
+ * be for this app and this device ID (the request hash), from the build Play distributes, on a
+ * phone with at least basic integrity. Google refuses to decode a standard token twice, so an old
+ * token can't be replayed, and the request hash ties it to one device ID.
+ */
+export function integrityProblem(p: IntegrityPayload | null, device: string): string | null {
+  if (!p) return "token not readable";
+  if (p.requestDetails?.requestPackageName !== PACKAGE) return "package " + p.requestDetails?.requestPackageName;
+  if (p.requestDetails?.requestHash !== device) return "request hash doesn't match";
+  if (p.appIntegrity?.appRecognitionVerdict !== "PLAY_RECOGNIZED") return "app " + p.appIntegrity?.appRecognitionVerdict;
+  if (p.appIntegrity?.packageName !== PACKAGE) return "app package " + p.appIntegrity?.packageName;
+  const labels = p.deviceIntegrity?.deviceRecognitionVerdict ?? [];
+  if (!labels.some((l) => DEVICE_LABELS.includes(l))) return "device " + (labels.join(",") || "none");
+  return null;
+}
+
+function hmacKey(secret: string, use: "sign" | "verify"): Promise<CryptoKey> {
+  return crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, [use]);
+}
+
+/** The device token for [device]: hex HMAC-SHA256 of the ID with DEVICE_TOKEN_SECRET. */
+export async function deviceToken(secret: string, device: string): Promise<string> {
+  const mac = await crypto.subtle.sign("HMAC", await hmacKey(secret, "sign"), new TextEncoder().encode(device));
+  return [...new Uint8Array(mac)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function tokenMatches(secret: string, device: string, token: string): Promise<boolean> {
+  if (!/^[0-9a-f]{64}$/.test(token)) return false;
+  const mac = Uint8Array.from(token.match(/../g)!, (h) => parseInt(h, 16));
+  return crypto.subtle.verify("HMAC", await hmacKey(secret, "verify"), mac, new TextEncoder().encode(device));
+}
+
+/** The answer when a call doesn't carry a valid device token, or null when it may go on. */
+async function unverified(request: Request, env: Env, device: string): Promise<Response | null> {
+  if (env.REQUIRE_INTEGRITY !== "true") return null;
+  const token = request.headers.get("X-Device-Token");
+  // Apps from before 0.9.11 send no token; they show this message as it is.
+  if (!token) return error(426, "Update Word for Word from Google Play to keep using free minutes.", "device_unverified");
+  if (!env.DEVICE_TOKEN_SECRET || !await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token)) {
+    return error(403, "Google Play couldn't confirm this phone. Free minutes work only in Word for Word from Google Play.", "device_unverified");
+  }
+  return null;
+}
+
 /**
  * Errors where another model may still work: the model is missing, busy, timed out, or its
  * company's servers failed. Not recording-size errors, which hit every model.
@@ -142,6 +203,30 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   const free = Number(env.FREE_SECONDS_PER_MONTH);
   const month = monthOf(now);
   const later = async (work: Promise<unknown>) => { if (defer) defer(work); else await work; };
+
+  if (url.pathname === "/v1/register" && request.method === "POST") {
+    if (!device) return error(400, "Missing device ID.");
+    if (!env.GOOGLE_SERVICE_ACCOUNT || !env.DEVICE_TOKEN_SECRET) return error(503, "Phones can't be checked right now.");
+    const { integrity_token: token } = await request.json().catch(() => ({})) as { integrity_token?: unknown };
+    if (typeof token !== "string" || token.length === 0) return error(400, "Missing integrity token.");
+    let payload: IntegrityPayload | null;
+    try {
+      payload = await decodeIntegrity(env.GOOGLE_SERVICE_ACCOUNT, token, fetcher, now.getTime());
+    } catch {
+      return error(503, "Google Play didn't answer. Try again.");
+    }
+    const problem = integrityProblem(payload, device);
+    if (problem) {
+      console.warn("Play Integrity refused a phone:", problem);
+      return error(403, "Google Play couldn't confirm this phone. Free minutes work only in Word for Word from Google Play.", "device_unverified");
+    }
+    return Response.json({ device_token: await deviceToken(env.DEVICE_TOKEN_SECRET, device) });
+  }
+
+  if (device && ["/v1/usage", "/v1/usage/extra", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)) {
+    const refused = await unverified(request, env, device);
+    if (refused) return refused;
+  }
 
   if (url.pathname === "/v1/usage" && request.method === "GET") {
     if (!device) return error(400, "Missing device ID.");

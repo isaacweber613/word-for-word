@@ -62,6 +62,8 @@ class AfterStopSpeedTest {
             context.getSharedPreferences("phonewhisper", Context.MODE_PRIVATE).edit().apply {
                 remove("cloud_model"); remove("language"); remove("verbatim")
                 if (FreeMinutes.available) remove("api_key") else putString("api_key", "test-key")
+                // A phone Google Play already vouched for, as every phone is after its first recording.
+                putString("device_token", "0".repeat(64))
             }.commit()
 
             val stream = OggOpus.Stream.start()!!
