@@ -91,7 +91,11 @@ object Billing {
                 val context = appContext ?: return
                 val paid = purchases.orEmpty().filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
                 if (paid.isEmpty()) { done?.invoke("Your payment is still being processed."); return }
-                thread { paid.forEach { register(context, it) }; done?.invoke(null) }
+                thread {
+                    val counted = paid.map { register(context, it) }.all { it }
+                    done?.invoke(if (counted) null else "Your payment went through, but Word for Word couldn't confirm it yet. " +
+                        "It tries again each time you open the app.")
+                }
             }
             BillingClient.BillingResponseCode.USER_CANCELED -> {}
             BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED -> appContext?.let { sync(it) { done?.invoke(null) } }
@@ -118,9 +122,12 @@ object Billing {
         }
     }
 
-    /** Tells the server about one paid purchase; once it has counted it, Play is told it was delivered. */
-    private fun register(context: Context, purchase: Purchase) {
-        val c = client ?: return
+    /**
+     * Tells the server about one paid purchase; once it has counted it, Play is told it was
+     * delivered. False when the server didn't count it.
+     */
+    private fun register(context: Context, purchase: Purchase): Boolean {
+        val c = client ?: return false
         for (product in purchase.products) {
             val body = JSONObject().put("product_id", product).put("purchase_token", purchase.purchaseToken).toString()
             val request = Request.Builder().url(BuildConfig.SERVICE_URL + "/v1/purchases")
@@ -129,15 +136,16 @@ object Billing {
             try {
                 http.newCall(request).execute().use { r ->
                     val answer = JSONObject(r.body?.string() ?: "{}")
-                    if (!r.isSuccessful) { Log.w(TAG, "Server didn't count $product: ${r.code}"); return }
+                    if (!r.isSuccessful) { Log.w(TAG, "Server didn't count $product: ${r.code}"); return false }
                     FreeMinutes.remember(context, answer.optBoolean("subscribed"), answer.optBoolean("out"))
                 }
-            } catch (e: Exception) { Log.w(TAG, "Couldn't send a purchase to the server", e); return }
+            } catch (e: Exception) { Log.w(TAG, "Couldn't send a purchase to the server", e); return false }
             if (product == HOURS) {
                 c.consumeAsync(ConsumeParams.newBuilder().setPurchaseToken(purchase.purchaseToken).build()) { _, _ -> }
             } else if (!purchase.isAcknowledged) {
                 c.acknowledgePurchase(AcknowledgePurchaseParams.newBuilder().setPurchaseToken(purchase.purchaseToken).build()) { }
             }
         }
+        return true
     }
 }

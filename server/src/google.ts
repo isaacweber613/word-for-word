@@ -55,7 +55,7 @@ export async function verify(serviceAccount: string, product: string, token: str
   const auth = { Authorization: "Bearer " + await accessToken(serviceAccount, fetcher, now) };
   if (subscription) {
     const res = await fetcher(API + "/subscriptionsv2/tokens/" + encodeURIComponent(token), { headers: auth });
-    if (!res.ok) return null;
+    if (!res.ok) return refused(res);
     const s = await res.json() as { subscriptionState?: string; lineItems?: { productId?: string; expiryTime?: string }[] };
     if (s.subscriptionState !== "SUBSCRIPTION_STATE_ACTIVE" && s.subscriptionState !== "SUBSCRIPTION_STATE_IN_GRACE_PERIOD") return null;
     const item = s.lineItems?.find((i) => i.productId === product) ?? s.lineItems?.[0];
@@ -63,7 +63,18 @@ export async function verify(serviceAccount: string, product: string, token: str
     return Number.isFinite(expiry) ? { kind: "subscription", product: item?.productId ?? product, expiry } : null;
   }
   const res = await fetcher(API + "/products/" + encodeURIComponent(product) + "/tokens/" + encodeURIComponent(token), { headers: auth });
-  if (!res.ok) return null;
+  if (!res.ok) return refused(res);
   const p = await res.json() as { purchaseState?: number };
   return p.purchaseState === 0 ? { kind: "product", product } : null;
+}
+
+/**
+ * Google said no. An unknown token is not paid (null); Google refusing this server (401, 403) or
+ * failing (5xx) throws, so the app is told to try again instead of being told it didn't pay.
+ */
+async function refused(res: Response): Promise<null> {
+  const text = (await res.text()).slice(0, 300);
+  console.error("Google Play purchase check", res.status, text);
+  if (res.status === 401 || res.status === 403 || res.status >= 500) throw new Error("Google answered " + res.status);
+  return null;
 }
