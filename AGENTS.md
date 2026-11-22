@@ -112,7 +112,12 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   Cloud project "Word for Word" (number 384040985984) is linked there; quota is 10,000 a day, free.
   Debug builds and sideloaded copies are never vouched for. The server only refuses calls without
   a valid token while `REQUIRE_INTEGRITY` in `server/wrangler.jsonc` is "true"; turn it on only once
-  every testing track has 0.9.11 or later, since older builds send no token.
+  every testing track has 0.9.11 or later, since older builds send no token. 2026-11-22: 0.9.11
+  (versionCode 48) is live on internal testing and in Google's review for closed testing (which had
+  0.9.9), together with the Data safety change (device IDs also for fraud prevention); enforcement
+  is still off. A preview Worker version with it on (`npx wrangler versions upload --var
+  REQUIRE_INTEGRITY:true --preview-alias integritytest`) refused made-up IDs from a computer: 426
+  without a token, 403 with a made-up one.
 - Free minutes per month: `FREE_SECONDS_PER_MONTH` in `server/wrangler.jsonc`.
 - Since 0.9.7 (Isaac, 2026-11-19: "It should be as fast as possible") cloud recordings upload as
   Ogg Opus, about 12 times smaller than WAV (`OggOpus.kt`, Android 10+). The app writes the Ogg
