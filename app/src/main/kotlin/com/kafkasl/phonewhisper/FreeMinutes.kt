@@ -55,7 +55,7 @@ object FreeMinutes {
 
     /** Registers in the background when this phone has no device token yet (at app start and when recording starts). */
     fun registerSoon(context: Context) {
-        if (inUse(context) && deviceToken(context) == null && !refused) thread { register(context) }
+        if (inUse(context) && !BuildConfig.DEBUG && deviceToken(context) == null && !refused) thread { register(context) }
     }
 
     /**
@@ -64,12 +64,14 @@ object FreeMinutes {
      * Blocks, so never call it on the main thread. Runs once per install, not per recording.
      */
     fun register(context: Context, again: Boolean = false): String? {
-        if (!inUse(context)) return null
+        // Google Play never vouches for a debug build, so it doesn't ask (and doesn't slow the speed test).
+        if (!inUse(context) || BuildConfig.DEBUG) return null
         if (!again) deviceToken(context)?.let { return it }
         synchronized(registering) {
             if (!again) deviceToken(context)?.let { return it }
             if (refused) return null
             val id = deviceId(context)
+            android.util.Log.i("PhoneWhisper", "No device token yet: asking Google Play to vouch for this phone")
             val integrity = Integrity.token(context, id)
             if (integrity == null) { Analytics.track("device_check", mapOf("result" to "no_play_token")); return null }
             val request = Request.Builder().url(BuildConfig.SERVICE_URL + "/v1/register").header("X-Device-Id", id)
