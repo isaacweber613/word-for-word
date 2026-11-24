@@ -142,7 +142,10 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   uses the minutes and hours up faster and no model choice loses money.
 - `POST /v1/purchases` checks a Play purchase with the Android Publisher API as the service account
   `play-purchases@word-for-word-515315.iam.gserviceaccount.com` (Google Cloud project "Word for
-  Word"; Play Console gave it "View financial data" on 2026-11-20). Its JSON key is only the
+  Word"; Play Console gave it "View financial data" on 2026-11-20). That alone wasn't enough:
+  Google refused every call with 401 "The current user has insufficient permissions" for 4 days,
+  until the account-level "View app information and download bulk reports (read-only)" was added
+  on 2026-11-24, and purchase checks worked minutes after a product edit. Its JSON key is only the
   Worker secret `GOOGLE_SERVICE_ACCOUNT`.
 
 ## Paid plan (agreed with Isaac 2026-11-20, built the same day)
