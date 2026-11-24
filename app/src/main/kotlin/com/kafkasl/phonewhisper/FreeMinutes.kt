@@ -53,9 +53,13 @@ object FreeMinutes {
     @Volatile private var refused = false
     private val registering = Any()
 
-    /** Registers in the background when this phone has no device token yet (at app start and when recording starts). */
+    /**
+     * Registers in the background when this phone has no device token yet (at app start and when
+     * recording starts). Also with the person's own key: Yiddish takes need the token whatever key
+     * is typed (YiddishServer).
+     */
     fun registerSoon(context: Context) {
-        if (inUse(context) && !BuildConfig.DEBUG && deviceToken(context) == null && !refused) thread { register(context) }
+        if (available && !BuildConfig.DEBUG && deviceToken(context) == null && !refused) thread { register(context) }
     }
 
     /**
@@ -65,7 +69,7 @@ object FreeMinutes {
      */
     fun register(context: Context, again: Boolean = false): String? {
         // Google Play never vouches for a debug build, so it doesn't ask (and doesn't slow the speed test).
-        if (!inUse(context) || BuildConfig.DEBUG) return null
+        if (!available || BuildConfig.DEBUG) return null
         if (!again) deviceToken(context)?.let { return it }
         synchronized(registering) {
             if (!again) deviceToken(context)?.let { return it }
@@ -143,27 +147,6 @@ object FreeMinutes {
         subscribed?.let { e.putBoolean("plan_subscribed", it) }
         out?.let { e.putBoolean("plan_out", it).putString("plan_out_month", month()) }
         e.apply()
-    }
-
-    /**
-     * Counts audio typed somewhere other than the server, [weight] times its length, against the
-     * same minutes and hours (AGENTS.local.md). Remembers whether any are left.
-     */
-    fun countElsewhere(context: Context, seconds: Double, weight: Double) {
-        if (!inUse(context) || seconds <= 0) return
-        val body = JSONObject().put("seconds", seconds).put("weight", weight).toString()
-        thread {
-            register(context)
-            val request = identify(Request.Builder().url(BuildConfig.SERVICE_URL + "/v1/usage/extra"), context)
-                .post(body.toRequestBody("application/json".toMediaType())).build()
-            http.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {}
-                override fun onResponse(call: Call, response: Response) {
-                    val out = try { JSONObject(response.body?.string() ?: "").optBoolean("out") } catch (e: Exception) { null }
-                    out?.let { remember(context, out = it) }
-                }
-            })
-        }
     }
 
     private fun month() = java.text.SimpleDateFormat("yyyy-MM", java.util.Locale.US)

@@ -824,7 +824,7 @@ class MainActivity : AppCompatActivity() {
         languageRow.visibility = if (useLocal) View.GONE else View.VISIBLE
         val language = prefs().getString("language", "auto") ?: "auto"
         languageRowSub.text = when {
-            language == "yi" -> "Yiddish: hold the mic button for Yiddish. A quick tap stays Auto"
+            language == "yi" && YiddishServer.available -> "Yiddish: hold the mic button for Yiddish. A quick tap stays Auto"
             language in modelLanguages -> TranscriberClient.LANGUAGES[language]
             language == "auto" -> "Auto: the model guesses"
             else -> "Auto: no ${TranscriberClient.LANGUAGES[language]} on this model"
@@ -1186,8 +1186,8 @@ class MainActivity : AppCompatActivity() {
     /** Language picker: Auto plus the languages the chosen model accepts. */
     private fun pickLanguage() {
         val model = currentModel()
-        // Yiddish is always offered: Yiddish takes go to the Yiddish model, whatever the cloud model.
-        val keys = listOf("auto") + (TranscriberClient.languagesFor(model) + "yi").distinct()
+        // Yiddish is always offered where Yiddish takes go to the Yiddish model, whatever the cloud model.
+        val keys = listOf("auto") + (TranscriberClient.languagesFor(model) + listOfNotNull("yi".takeIf { YiddishServer.available })).distinct()
         val names = keys.map { if (it == "auto") "Auto" else TranscriberClient.LANGUAGES[it] }.toTypedArray()
         val current = keys.indexOf(prefs().getString("language", "auto")).coerceAtLeast(0)
         android.app.AlertDialog.Builder(this)

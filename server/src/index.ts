@@ -29,9 +29,12 @@
  *   POST /v1/transcriptions  same JSON body as OpenRouter's /api/v1/audio/transcriptions. The
  *                            body's model is ignored. Answers like OpenRouter, with X-Model.
  *   GET  /v1/usage           {"used_seconds", "free_seconds", "month", "subscribed", "out"}
- *   POST /v1/usage/extra     {"seconds", "weight"}: audio transcribed elsewhere that still counts.
  *   POST /v1/purchases       {"product_id", "purchase_token"}: a Google Play purchase to check
  *                            and count. Answers {"subscribed", "out"}.
+ *
+ * The Worker in front of the Yiddish model asks this server before each of the app's Yiddish takes
+ * and counts the take afterwards, through the RPC entrypoint in worker.ts (yiddishCheck and
+ * yiddishCharge below), which isn't on the internet.
  */
 
 import { decodeIntegrity, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
@@ -223,7 +226,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     return Response.json({ device_token: await deviceToken(env.DEVICE_TOKEN_SECRET, device) });
   }
 
-  if (device && ["/v1/usage", "/v1/usage/extra", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)) {
+  if (device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)) {
     const refused = await unverified(request, env, device);
     if (refused) return refused;
   }
@@ -233,18 +236,6 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     const a = await store.account(device, month);
     return Response.json({ used_seconds: a.freeUsed, free_seconds: free, month,
       subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !choose(a, now.getTime(), free) });
-  }
-
-  if (url.pathname === "/v1/usage/extra" && request.method === "POST") {
-    if (!device) return error(400, "Missing device ID.");
-    const { seconds, weight } = await request.json().catch(() => ({})) as { seconds?: unknown; weight?: unknown };
-    if (typeof seconds !== "number" || !(seconds > 0)) return error(400, "Missing seconds.");
-    const w = typeof weight === "number" && weight >= 1 ? weight : 1;
-    const a = await store.account(device, month);
-    const pick = choose(a, now.getTime(), free);
-    if (pick) await store.charge(device, month, pick.bucket, seconds * w, a.sub);
-    const after = await store.account(device, month);
-    return Response.json({ out: !choose(after, now.getTime(), free) });
   }
 
   if (url.pathname === "/v1/purchases" && request.method === "POST") {
@@ -315,6 +306,46 @@ export async function handle(request: Request, env: Env, store: Store, now = new
       pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR), a.sub));
   }
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
+}
+
+/** How many plan seconds a second of Yiddish audio counts for (AGENTS.local.md). */
+export const YIDDISH_WEIGHT = 2;
+
+export type CheckAnswer = { ok: true } | { ok: false; status: number; code: string; message: string };
+
+/**
+ * Whether the app's Yiddish take may go to the Yiddish model (Isaac, 2026-11-24: "I don't want
+ * everyone to be able to do that"). The model doesn't run on the person's OpenRouter key, so a
+ * typed key changes nothing: every take needs a phone Google Play vouched for (a device token,
+ * whatever REQUIRE_INTEGRITY says) with time left in the same free minutes and hours as
+ * everything else. Builds not from Google Play never get a token, so they never get Yiddish.
+ */
+export async function yiddishCheck(env: Env, store: Store, device: unknown, token: unknown,
+                                   now = new Date()): Promise<CheckAnswer> {
+  if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) {
+    return { ok: false, status: 400, code: "no_device", message: "Missing device ID." };
+  }
+  if (typeof token !== "string" || !env.DEVICE_TOKEN_SECRET || !await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token)) {
+    return { ok: false, status: 403, code: "device_unverified", message: "Google Play couldn't confirm this phone." };
+  }
+  const free = Number(env.FREE_SECONDS_PER_MONTH);
+  const a = await store.account(device, monthOf(now));
+  if (choose(a, now.getTime(), free)) return { ok: true };
+  const out = await outOfTime(a, now.getTime(), free).json() as { error: { message: string; code: string } };
+  return { ok: false, status: 402, code: out.error.code, message: out.error.message };
+}
+
+/** Counts [seconds] of audio the Yiddish model typed, at YIDDISH_WEIGHT, on whatever pays next. */
+export async function yiddishCharge(env: Env, store: Store, device: unknown, seconds: unknown,
+                                    now = new Date()): Promise<void> {
+  if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) return;
+  if (typeof seconds !== "number" || !(seconds > 0)) return;
+  const month = monthOf(now);
+  const a = await store.account(device, month);
+  const pick = choose(a, now.getTime(), Number(env.FREE_SECONDS_PER_MONTH));
+  // Nothing left now: the take was allowed when it started, so it still counts.
+  const bucket = pick?.bucket ?? (a.sub && a.sub.expiry > now.getTime() ? "sub" : "free");
+  await store.charge(device, month, bucket, seconds * YIDDISH_WEIGHT, a.sub);
 }
 
 export default {

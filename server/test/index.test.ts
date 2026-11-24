@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds, type Env,
+  audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds,
+  yiddishCharge, yiddishCheck, type Env,
 } from "../src/index";
 import { DEFAULT_MODELS, type Account, type Bucket, type Models, type Store, type Sub } from "../src/store";
 
@@ -180,13 +181,32 @@ describe("transcription server", () => {
     expect(s.free).toBe(0);
   });
 
-  it("counts audio typed elsewhere at its weight", async () => {
+  it("lets a Yiddish take through only with a device token and time left, whatever REQUIRE_INTEGRITY says", async () => {
+    const e = { ...env, DEVICE_TOKEN_SECRET: "s" } as Env;
+    const token = await deviceToken("s", device);
+    expect(await yiddishCheck(e, memoryStore().store, device, token, now)).toEqual({ ok: true });
+    // A made-up phone (or any key typed in the app) without a token from Google Play: refused.
+    expect(await yiddishCheck(e, memoryStore().store, device, null, now)).toMatchObject({ ok: false, status: 403, code: "device_unverified" });
+    expect(await yiddishCheck(e, memoryStore().store, device, "b".repeat(64), now)).toMatchObject({ ok: false, status: 403 });
+    expect(await yiddishCheck(e, memoryStore().store, "made-up", token, now)).toMatchObject({ ok: false, status: 400 });
+    // No time left: the same answer as a normal recording.
+    expect(await yiddishCheck(e, memoryStore({ free: 1800 }).store, device, token, now))
+      .toMatchObject({ ok: false, status: 402, code: "free_minutes_used" });
+    const subscribed = memoryStore({ free: 1800, sub: { token: "t", product: "monthly", expiry: later }, subUsed: SUB_SECONDS });
+    expect(await yiddishCheck(e, subscribed.store, device, token, now)).toMatchObject({ ok: false, status: 402, code: "hours_used" });
+  });
+
+  it("counts a Yiddish take twice its length on whatever pays next", async () => {
     const { s, store } = memoryStore();
-    const res = await handle(new Request("https://example.com/v1/usage/extra", {
-      method: "POST", headers: { "X-Device-Id": device }, body: JSON.stringify({ seconds: 30, weight: 2 }),
-    }), env, store, now, ok);
-    expect(await res.json()).toEqual({ out: false });
+    await yiddishCharge(env, store, device, 30, now);
     expect(s.free).toBe(60);
+    const sub = memoryStore({ free: 1800, sub: { token: "t", product: "monthly", expiry: later } });
+    await yiddishCharge(env, sub.store, device, 30, now);
+    expect(sub.s.subUsed).toBe(60);
+    // Allowed when it started but nothing left by the end: still counted.
+    const out = memoryStore({ free: 1800 });
+    await yiddishCharge(env, out.store, device, 30, now);
+    expect(out.s.free).toBe(1860);
   });
 
   it("needs a device ID", async () => {

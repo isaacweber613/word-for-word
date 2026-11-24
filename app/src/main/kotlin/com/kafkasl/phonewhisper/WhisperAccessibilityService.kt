@@ -828,8 +828,8 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun startRecording(via: String, yiddish: Boolean = false) {
         if (yiddish && YiddishServer.needsConsent(prefs())) { askYiddishConsent(via); return }
-        // Uses the same minutes and hours as other recordings (AGENTS.local.md).
-        if (yiddish && FreeMinutes.inUse(this) && FreeMinutes.out(this)) { toast(FreeMinutes.outMessage(this)); return }
+        // Uses the same minutes and hours as other recordings, whatever key is typed (AGENTS.local.md).
+        if (yiddish && FreeMinutes.out(this)) { toast(FreeMinutes.outMessage(this)); return }
         if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
             != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             toast("Microphone permission is off. Open Word for Word to turn it on."); return
@@ -866,7 +866,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         state = State.RECORDING
         setBusy(false)
         setAppearance(if (yiddish) COLOR_YIDDISH else COLOR_RECORDING)
-        if (yiddish) { showFeedback("Yiddish", 1500); warmYiddish.run() }
+        if (yiddish) { showFeedback("Yiddish", 1500); warmYiddish.run(); FreeMinutes.registerSoon(this) }
         startPulse()
         buzz()
 
@@ -913,10 +913,9 @@ class WhisperAccessibilityService : AccessibilityService() {
         val seconds = Math.round(pcm.size / 3200.0) / 10.0
         val appVersion = BuildConfig.VERSION_NAME
         val install = YiddishServer.installId(this)
-        YiddishServer.transcribe(WavWriter.encode(pcm), appVersion, install) { result ->
+        YiddishServer.transcribe(this, WavWriter.encode(pcm), appVersion, install) { result ->
             if (!result.text.isNullOrBlank()) {
                 Analytics.track("transcribed", mapOf("model" to "yiddish-pc", "seconds" to seconds, "backup_model" to false, "free_minutes" to false))
-                FreeMinutes.countElsewhere(this, seconds, YiddishServer.WEIGHT)
                 handleTranscriptionResult(result.text, "yiddish-pc", pcm)
             } else if (YiddishServer.isOff(result)) {
                 yiddishTake = false

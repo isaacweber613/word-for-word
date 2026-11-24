@@ -9,6 +9,7 @@ import org.json.JSONObject
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 /**
  * Yiddish dictation (Isaac, 2026-11-08): with Yiddish picked as the language, holding the mic
@@ -18,17 +19,23 @@ import java.util.concurrent.TimeUnit
  * Nothing changes unless Yiddish is the picked language.
  *
  * The PC keeps every take for training, in every build including Play. See PRIVACY.md.
+ *
+ * Isaac (2026-11-24): "I don't want everyone to be able to do that." Every take carries the
+ * phone's ID and device token ([FreeMinutes.identify]), and the Worker asks Word for Word's server
+ * (server/) whether the phone has time left, whatever OpenRouter key is typed, then counts the
+ * take there. No phone is exempt. Builds not from Google Play get no device token, so they don't
+ * offer these takes at all ([available]); there Yiddish is a normal language for the cloud model.
  */
 object YiddishServer {
     private const val BASE = "https://yiddishtry.ynbsd6242.workers.dev"
     // The Worker's password for its try-it page; it gates the PC model and the saved takes.
     private const val PASSWORD = "4837"
 
-    fun enabled(p: SharedPreferences) =
-        p.getString("language", "auto") == "yi"
+    /** Only the Play build, which has free minutes and the subscription to count these takes against. */
+    val available get() = FreeMinutes.available
 
-    /** How much a take here counts against the Play build's minutes and hours (AGENTS.local.md). */
-    const val WEIGHT = 2.0
+    fun enabled(p: SharedPreferences) =
+        available && p.getString("language", "auto") == "yi"
 
     /** Pref: the person agreed to [DISCLOSURE]. */
     const val CONSENT = "yiddish_training_consent"
@@ -95,29 +102,46 @@ object YiddishServer {
      * Every Yiddish take is kept on the PC for training. [source] is saved with the take: "app" for
      * dictation, "app-share" for an audio file shared to the app.
      */
-    fun transcribe(wav: ByteArray, appVersion: String, install: String, source: String = "app",
+    fun transcribe(context: Context, wav: ByteArray, appVersion: String, install: String, source: String = "app",
                    callback: (TranscriberClient.Result) -> Unit) {
-        val request = Request.Builder()
-            .url("$BASE/api/transcribe")
-            .header("x-password", PASSWORD)
-            .header("x-client", source)
-            .header("x-app-version", appVersion)
-            .header("x-install", install)
-            .post(wav.toRequestBody("audio/wav".toMediaType()))
-            .build()
-        client.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) = callback(offline(e))
+        fun send(retried: Boolean) {
+            val request = FreeMinutes.identify(Request.Builder(), context)
+                .url("$BASE/api/transcribe")
+                .header("x-password", PASSWORD)
+                .header("x-client", source)
+                .header("x-app-version", appVersion)
+                .header("x-install", install)
+                .post(wav.toRequestBody("audio/wav".toMediaType()))
+                .build()
+            client.newCall(request).enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) = callback(offline(e))
 
-            override fun onResponse(call: Call, response: Response) {
-                val body = response.body?.string() ?: ""
-                val json = try { JSONObject(body) } catch (_: Exception) { null }
-                if (response.isSuccessful && json != null) {
-                    callback(TranscriberClient.Result(json.optString("text", ""), null))
-                } else {
-                    callback(failure(response.code, json))
+                override fun onResponse(call: Call, response: Response) {
+                    val body = response.body?.string() ?: ""
+                    val json = try { JSONObject(body) } catch (_: Exception) { null }
+                    val code = json?.optString("code").orEmpty()
+                    when {
+                        response.isSuccessful && json != null -> {
+                            FreeMinutes.remember(context, out = false)
+                            callback(TranscriberClient.Result(json.optString("text", ""), null))
+                        }
+                        // The server no longer takes this phone's device token: ask Google Play again, once.
+                        code == "device_unverified" && !retried -> thread {
+                            if (FreeMinutes.register(context, again = true) != null) send(true)
+                            else callback(failure(context, response.code, json))
+                        }
+                        // Nothing left: send the Google Play purchases again once, in case the subscription just renewed.
+                        code in OUT_CODES && !retried && Billing.available -> {
+                            FreeMinutes.remember(context, out = true)
+                            Billing.sync(context) { left -> if (left) send(true) else callback(failure(context, response.code, json)) }
+                        }
+                        else -> callback(failure(context, response.code, json))
+                    }
                 }
-            }
-        })
+            })
+        }
+        // Usually saved long ago; only the first take on a phone waits for Google Play here.
+        if (FreeMinutes.deviceToken(context) == null) thread { FreeMinutes.register(context); send(false) } else send(false)
     }
 
     /**
@@ -127,9 +151,10 @@ object YiddishServer {
      * every 3 s (POST /api/job/status), or 5 s after a failed ask. Blocks; call it off the main
      * thread. [progress] gets how much of the file is typed out, 0 to 1, when the PC says.
      */
-    fun transcribeJob(wav: ByteArray, appVersion: String, install: String, source: String,
+    fun transcribeJob(context: Context, wav: ByteArray, appVersion: String, install: String, source: String,
                       progress: (Double) -> Unit): TranscriberClient.Result {
-        val start = Request.Builder()
+        FreeMinutes.register(context)
+        fun start() = FreeMinutes.identify(Request.Builder(), context)
             .url("$BASE/api/job")
             .header("x-password", PASSWORD)
             .header("x-client", source)
@@ -137,14 +162,21 @@ object YiddishServer {
             .header("x-install", install)
             .post(wav.toRequestBody("audio/wav".toMediaType()))
             .build()
-        val job = try {
-            client.newCall(start).execute().use { response ->
-                val json = try { JSONObject(response.body?.string() ?: "") } catch (_: Exception) { null }
-                json?.optString("job")?.takeIf { response.isSuccessful && it.isNotBlank() }
-                    ?: return failure(response.code, json)
+        var job: String? = null
+        var retried = false
+        while (job == null) {
+            try {
+                client.newCall(start()).execute().use { response ->
+                    val json = try { JSONObject(response.body?.string() ?: "") } catch (_: Exception) { null }
+                    job = json?.optString("job")?.takeIf { response.isSuccessful && it.isNotBlank() }
+                    // The server no longer takes this phone's device token: ask Google Play again, once.
+                    if (job == null && !(json?.optString("code") == "device_unverified" && !retried &&
+                            FreeMinutes.register(context, again = true) != null)) return failure(context, response.code, json)
+                    retried = true
+                }
+            } catch (e: IOException) {
+                return offline(e)
             }
-        } catch (e: IOException) {
-            return offline(e)
         }
         var wait = 3000L
         while (true) {
@@ -157,7 +189,7 @@ object YiddishServer {
             val json = try {
                 client.newCall(ask).execute().use { response ->
                     val json = try { JSONObject(response.body?.string() ?: "") } catch (_: Exception) { null }
-                    if (!response.isSuccessful || json == null) return failure(response.code, json)
+                    if (!response.isSuccessful || json == null) return failure(context, response.code, json)
                     json
                 }
             } catch (_: IOException) {
@@ -169,7 +201,7 @@ object YiddishServer {
                 if (json.has("progress")) progress(json.optDouble("progress"))
                 continue
             }
-            if (json.optString("error").isNotBlank()) return failure(500, json)
+            if (json.optString("error").isNotBlank()) return failure(context, 500, json)
             return TranscriberClient.Result(json.optString("text", ""), null)
         }
     }
@@ -178,12 +210,21 @@ object YiddishServer {
         if (e is java.net.UnknownHostException) "No internet connection. Your words weren't sent."
         else "Couldn't reach the Yiddish model. Try again.")
 
-    private fun failure(code: Int, json: JSONObject?): TranscriberClient.Result {
-        val msg = when (code) {
-            503 -> "The Yiddish model is offline right now (the computer running it is off)."
+    /** Word for Word's server's answers when nothing is left (server/src/index.ts yiddishCheck). */
+    private val OUT_CODES = setOf("free_minutes_used", "hours_used")
+
+    private fun failure(context: Context, code: Int, json: JSONObject?): TranscriberClient.Result {
+        val errorCode = json?.optString("code").orEmpty()
+        if (errorCode in OUT_CODES) FreeMinutes.remember(context, out = true)
+        val msg = when {
+            code == 503 -> "The Yiddish model is offline right now (the computer running it is off)."
+            errorCode == "free_minutes_used" -> FreeMinutes.OUT_FREE
+            errorCode == "hours_used" -> FreeMinutes.OUT_HOURS
+            errorCode == "device_unverified" ->
+                "Yiddish works only in Word for Word from Google Play, on a phone that passes Google Play's checks."
             else -> "The Yiddish model had a problem (${json?.optString("error")?.takeIf { it.isNotBlank() } ?: code}). Try again."
         }
-        return TranscriberClient.Result(null, msg, code)
+        return TranscriberClient.Result(null, msg, code, errorCode = errorCode.ifBlank { null })
     }
 
 }

@@ -116,16 +116,15 @@ class ShareActivity : AppCompatActivity() {
     private fun send(piece: ByteArray) {
         val wav = WavWriter.encode(piece)
         if (!yiddish) { sendCloud(piece, wav); return }
-        if (FreeMinutes.inUse(this) && FreeMinutes.out(this)) { ui { fail(FreeMinutes.outMessage(this)) }; return }
+        if (FreeMinutes.out(this)) { ui { fail(FreeMinutes.outMessage(this)) }; return }
         val install = YiddishServer.installId(this)
-        val result = YiddishServer.transcribeJob(wav, BuildConfig.VERSION_NAME, install, "app-share") { f ->
+        val result = YiddishServer.transcribeJob(this, wav, BuildConfig.VERSION_NAME, install, "app-share") { f ->
             ui { showProgress(done + (f * piece.size).toLong()) }
         }
         if (!result.text.isNullOrBlank()) {
             val seconds = Math.round(piece.size / 3200.0) / 10.0
             Analytics.track("transcribed", mapOf("model" to "yiddish-pc",
                 "seconds" to seconds, "backup_model" to false, "free_minutes" to false))
-            FreeMinutes.countElsewhere(this, seconds, YiddishServer.WEIGHT)
             ui { pieceDone(piece, result.text, "yiddish-pc") }
         } else if (YiddishServer.isOff(result)) {
             yiddish = false

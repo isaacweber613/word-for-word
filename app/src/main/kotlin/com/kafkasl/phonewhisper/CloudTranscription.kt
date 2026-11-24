@@ -54,7 +54,8 @@ object CloudTranscription {
                     else p.getString("cloud_model", TranscriberClient.DEFAULT_MODEL) ?: TranscriberClient.DEFAULT_MODEL
         val verbatim = p.getBoolean("verbatim", false)
         // With Yiddish picked, Yiddish audio goes to the Yiddish model; anything else lets the model guess.
-        val language = (p.getString("language", "auto") ?: "auto").let { if (it == "yi") "auto" else it }
+        // Builds without Yiddish takes send Yiddish to the cloud model like any language (YiddishServer.available).
+        val language = (p.getString("language", "auto") ?: "auto").let { if (it == "yi" && YiddishServer.available) "auto" else it }
         // Audio length to a tenth of a second (32,000 bytes a second after the 44-byte header), for usage stats.
         val seconds = Math.round((wav.size - 44) / 3200.0) / 10.0
 

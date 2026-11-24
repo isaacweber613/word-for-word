@@ -215,6 +215,19 @@ part") the app no longer follows edits to a typed take or sends corrected words 
 service doesn't receive text-changed events at all. Debug builds:
 `am broadcast -a com.isaacweber.wordforword.DEBUG_DICTATE --es text "..."` types text without audio. Never stop the PC model server to test (Isaac, 2026-11-08).
 
+Since 0.9.14 (Isaac, 2026-11-24: "it's a good thing that I can use Yiddish, but I don't want
+everyone to be able to do that") the server decides, not the app. Before, any OpenRouter key typed
+in the app, even a made-up one, skipped the minutes check, and the PC checked nothing. Now every
+Yiddish take sends `X-Device-Id` and `X-Device-Token`, and the `yiddishtry` Worker asks this repo's
+server (RPC entrypoint `Yiddish` in `server/src/worker.ts`, service binding `WFW`) while the audio
+is still arriving: the phone needs a device token from Play Integrity, whatever
+`REQUIRE_INTEGRITY` says, and time left in its free minutes or hours, whatever key is typed. A take
+that comes back with words is counted there (`yiddishCheck`, `yiddishCharge`). No phone is exempt
+(Isaac, same day: "I don't want mine to be different than everyone's"). GitHub builds never get a
+device token, so they don't offer Yiddish takes (`YiddishServer.available`); Yiddish is a normal
+language for the cloud model there. Apps before 0.9.14 send no device ID and get 503, which they
+treat as the PC being off. Deploy both: `server/` first, then `tryout/worker` in yiddish-stt.
+
 ## Recordings kept in History (Isaac, 2026-11-24, built in 0.9.13)
 
 "If a transcription fails for any reason whatsoever ... you should still see the actual audio file
