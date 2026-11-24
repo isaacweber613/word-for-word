@@ -48,3 +48,9 @@ The existing GitHub APK release workflow remains separate from uploading the Pla
 - Accessibility declaration saved: App functionality, no personal data collected through it, video https://youtu.be/8SB5J919WO0 (unlisted, 53 s, Play build 0.9.4, narrated).
 - Closed testing - Alpha: 41 (0.9.4), 142 countries plus Rest of World (EEA, UK, Russia, Belarus, Indonesia, Vietnam removed), testers = "Internal testers" list. A public Google Group "wordforwordtesters" is not created yet (Google Groups wanted a CAPTCHA a person must tick).
 - All 14 changes submitted for review with Isaac's OK ("Yeah send it"). Managed publishing is off, so the closed test goes live when Google approves.
+
+## 2026-11-24: 14-day clock, paid plan working
+- Play Console: "12 testers have currently been opted in for 1 day" (Google Group word-for-word-testers, 13 members with Isaac). Exactly 12, so one tester leaving matters. Earliest production application about 2026-12-07.
+- A daily T3 scheduled task checks the closed test at 9:00 AM through 12-07 and messages Isaac on a problem or when production can be applied for. It doesn't apply by itself.
+- Enrolled in the 15% service fee program (Isaac asked; account group is micromax alone).
+- Isaac's test subscription reached the server and was counted.
