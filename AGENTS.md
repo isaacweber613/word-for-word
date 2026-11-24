@@ -227,6 +227,10 @@ that comes back with words is counted there (`yiddishCheck`, `yiddishCharge`). N
 device token, so they don't offer Yiddish takes (`YiddishServer.available`); Yiddish is a normal
 language for the cloud model there. Apps before 0.9.14 send no device ID and get 503, which they
 treat as the PC being off. Deploy both: `server/` first, then `tryout/worker` in yiddish-stt.
+Shipped 2026-11-24: word-for-word Worker version 2d7af896, yiddishtry 8e567285 (yiddish-stt
+141728a), 0.9.14 (versionCode 51) on GitHub, Play internal testing, and in Google's review for
+closed testing. Checked live: no device ID 503, a made-up device ID with no token or a made-up
+token 403 `device_unverified`, on both `/api/transcribe` and `/api/job`.
 
 ## Recordings kept in History (Isaac, 2026-11-24, built in 0.9.13)
 
