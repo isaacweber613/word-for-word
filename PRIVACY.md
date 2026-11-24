@@ -31,7 +31,7 @@ To stop sending recordings for training, use a quick tap or the normal shortcut,
 ## What stays on your phone
 
 - **Your OpenRouter API key**, stored in the app's private storage.
-- **Your transcription history**, stored in the app's private storage. By default the app deletes entries after 24 hours. You can choose to keep them, and you can delete them at any time.
+- **Your transcription history**, stored in the app's private storage. When a recording can't be typed, its audio is saved there with the entry; with Always save audio turned on, every recording's audio is saved. By default the app deletes entries and their audio after 24 hours. You can choose to keep them, and you can delete them at any time.
 
 Uninstalling the app deletes both.
 

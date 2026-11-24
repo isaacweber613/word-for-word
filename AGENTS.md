@@ -214,3 +214,15 @@ kept on the PC for training (D:/yiddish-stt/takes). Since 0.9.3 (Isaac, 2026-11-
 part") the app no longer follows edits to a typed take or sends corrected words back; the
 service doesn't receive text-changed events at all. Debug builds:
 `am broadcast -a com.isaacweber.wordforword.DEBUG_DICTATE --es text "..."` types text without audio. Never stop the PC model server to test (Isaac, 2026-11-08).
+
+## Recordings kept in History (Isaac, 2026-11-24, built in 0.9.13)
+
+"If a transcription fails for any reason whatsoever ... you should still see the actual audio file
+and you should be able to save or share it ... Also add a switch to always save the audio." A
+recording that couldn't be typed (no key, no connection, out of minutes, server error, Yiddish PC
+failure) goes to History with its audio (`HistoryStore.addWithAudio`, Ogg Opus in
+`filesDir/audio`, WAV below Android 10), marked "Not typed" with the reason, and Play, Save and
+Share under it. Not kept: recordings too short to send, and ones the model answered with no words
+("only if it's a legit recording"). A later try that types it fills in the same entry. History's
+"Always save audio" switch (pref `always_save_audio`) keeps the audio of typed recordings too.
+Audio is deleted with its entry, after 24 hours unless "Keep history forever" is on.

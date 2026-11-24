@@ -80,6 +80,10 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var state = State.IDLE
     /** The recording that failed to transcribe, kept so a tap can send it again. */
     private var failedPcm: ByteArray? = null
+    /** The History entry a failed recording was saved to (its audio, entry time), so a later try updates it. */
+    @Volatile private var keptEntry: Pair<ByteArray, Long>? = null
+    /** History writes run here, one at a time and in order, so saving audio never holds up typing. */
+    private val historyWriter = java.util.concurrent.Executors.newSingleThreadExecutor()
     /** The current (or failed) take goes to the Yiddish model; see [YiddishServer]. */
     private var yiddishTake = false
     private var consentDialog: android.app.AlertDialog? = null
@@ -750,9 +754,10 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** Keeps the recording and turns the button into a retry button. */
-    private fun failWithRetry(pcm: ByteArray, msg: String) {
+    /** Keeps the recording, also in History with its audio, and turns the button into a retry button. */
+    private fun failWithRetry(pcm: ByteArray, msg: String, model: String = "") {
         handler.post {
+            keepInHistory(pcm, msg, model)
             failedPcm = pcm
             state = State.RETRY
             setBusy(false)
@@ -771,9 +776,25 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (yiddishTake) transcribeYiddish(pcm) else transcribeApi(pcm)
     }
 
+    /**
+     * A recording that couldn't be typed goes to History with its audio, so it can be played,
+     * saved or shared even if no try ever types it (Isaac, 2026-11-24). Runs on the main thread.
+     */
+    private fun keepInHistory(pcm: ByteArray, msg: String, model: String) {
+        val kept = keptEntry
+        if (kept != null && kept.first === pcm) {
+            historyWriter.execute { HistoryStore.update(this, kept.second) { it.copy(error = msg) } }
+            return
+        }
+        val time = System.currentTimeMillis()
+        keptEntry = pcm to time
+        historyWriter.execute { HistoryStore.addWithAudio(this, time, pcm, "", model, msg) }
+    }
+
     private fun discardFailed() {
         if (state != State.RETRY) return
         failedPcm = null
+        keptEntry = null
         reset("Recording discarded")
     }
 
@@ -896,7 +917,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             if (!result.text.isNullOrBlank()) {
                 Analytics.track("transcribed", mapOf("model" to "yiddish-pc", "seconds" to seconds, "backup_model" to false, "free_minutes" to false))
                 FreeMinutes.countElsewhere(this, seconds, YiddishServer.WEIGHT)
-                handleTranscriptionResult(result.text, "yiddish-pc")
+                handleTranscriptionResult(result.text, "yiddish-pc", pcm)
             } else if (YiddishServer.isOff(result)) {
                 yiddishTake = false
                 handler.post { showFeedback(YiddishServer.OFF_NOTICE, 3000) }
@@ -942,7 +963,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         CloudTranscription.run(this, WavWriter.encode(pcm), opus) { o ->
             if (o.text != null) {
                 o.notice?.let { showFeedback(it, 4000) }
-                handleTranscriptionResult(o.text, o.model)
+                handleTranscriptionResult(o.text, o.model, pcm)
             } else {
                 failTranscription(pcm, o.model, o.failure!!)
             }
@@ -958,12 +979,12 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (CloudTranscription.trackFailure(model, result)) {
             handler.post { reset(NO_WORDS) }
         } else {
-            failWithRetry(pcm, result.error ?: NO_WORDS)
+            failWithRetry(pcm, result.error ?: NO_WORDS, model)
         }
     }
 
-    /** [usedModel] is the model that wrote [text], saved with it in history. */
-    private fun handleTranscriptionResult(text: String?, usedModel: String? = null) {
+    /** [usedModel] is the model that wrote [text], saved with it in history; [pcm] is the recording. */
+    private fun handleTranscriptionResult(text: String?, usedModel: String? = null, pcm: ByteArray? = null) {
         if (text.isNullOrBlank()) {
             handler.post {
                 toast("No speech detected")
@@ -975,12 +996,23 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
 
         // Save your exact words to history (kept 24 hours, or forever if that's turned on).
-        try {
-            val model = usedModel ?: if (prefs().getBoolean("use_local", false)) "local"
-                        else prefs().getString("cloud_model", TranscriberClient.DEFAULT_MODEL) ?: ""
-            HistoryStore.add(this, text, model)
-        } catch (e: Exception) {
-            Log.w(TAG, "Couldn't save to history", e)
+        val model = usedModel ?: if (prefs().getBoolean("use_local", false)) "local"
+                    else prefs().getString("cloud_model", TranscriberClient.DEFAULT_MODEL) ?: ""
+        val kept = keptEntry?.takeIf { pcm != null && it.first === pcm }
+        if (kept != null) keptEntry = null
+        historyWriter.execute {
+            try {
+                if (kept != null) {
+                    // An earlier try failed and saved this recording; it now gets its text.
+                    HistoryStore.update(this, kept.second) { it.copy(text = text, model = model, error = null) }
+                } else if (pcm != null && HistoryStore.alwaysSaveAudio(this)) {
+                    HistoryStore.addWithAudio(this, System.currentTimeMillis(), pcm, text, model)
+                } else {
+                    HistoryStore.add(this, text, model)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Couldn't save to history", e)
+            }
         }
 
         val usePostProcessing = prefs().getBoolean("use_post_processing", false)
