@@ -167,6 +167,8 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (BuildConfig.DEBUG) {
             androidx.core.content.ContextCompat.registerReceiver(this, object : android.content.BroadcastReceiver() {
                 override fun onReceive(c: Context, i: android.content.Intent) {
+                    // Typed where the cursor is now, never into the box of an earlier recording that typed nothing.
+                    setDictationTarget(focusedInput())
                     handleTranscriptionResult(i.getStringExtra("text"), "debug")
                 }
             }, android.content.IntentFilter("com.isaacweber.wordforword.DEBUG_DICTATE"),
@@ -1133,8 +1135,10 @@ class WhisperAccessibilityService : AccessibilityService() {
             if (typed) { Analytics.track("text_inserted", mapOf("method" to "typed")); return }
             (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
                 .setPrimaryClip(ClipData.newPlainText("Word for Word", text))
-            Analytics.track("text_inserted", mapOf("method" to "target_gone"))
-            showFeedback("The box you dictated into is gone. Copied to clipboard and saved to history", 3000)
+            Analytics.track("text_inserted", mapOf("method" to if (alive) "clipboard_only" else "target_gone"))
+            // Still there but it took neither typing nor pasting: the same words as for any such box.
+            showFeedback(if (alive) "Couldn't type here. Copied to clipboard and saved to history"
+                         else "The box you dictated into is gone. Copied to clipboard and saved to history", 3000)
             showingPasteFailure = true
             handler.removeCallbacks(endPasteFailure)
             handler.postDelayed(endPasteFailure, 3000)

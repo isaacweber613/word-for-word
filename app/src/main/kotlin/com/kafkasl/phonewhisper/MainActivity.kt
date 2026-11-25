@@ -655,10 +655,8 @@ class MainActivity : AppCompatActivity() {
             .setTitle("Import settings?")
             .setMessage("This replaces all your current settings, including your API key.")
             .setPositiveButton("Import") { _, _ ->
+                // Agreements, the device token and the Yiddish install id stay this phone's own (SettingsBackup.THIS_PHONE).
                 SettingsBackup.apply(prefs(), values)
-                // Agreeing to Yiddish training or to the Accessibility disclosure belongs to this phone; it never
-                // arrives from a settings file. Nor does another phone's device token, which the server refuses here.
-                prefs().edit().remove(YiddishServer.CONSENT).remove("acc_disclosure_agreed").remove("device_token").apply()
                 WhisperAccessibilityService.instance?.applyShortcutSettings()
                 refresh()
                 Toast.makeText(this, "Settings imported", Toast.LENGTH_SHORT).show()
