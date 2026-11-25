@@ -378,6 +378,17 @@ describe("transcription server", () => {
       }
     });
 
+    it("never serves an unpaid one that Google stops knowing before its expiry, and stops asking", async () => {
+      for (const state of ["ON_HOLD", "PAUSED", "PENDING"]) {
+        const g = await googleSays("", null);   // Google no longer knows the token (410)
+        const { s, store } = memoryStore({ free: 1800, sub: { ...paid, state, checked: now.getTime() - DAY } });
+        expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(402);
+        expect(s.sub).toMatchObject({ state: "GONE", expiry: later });
+        expect((await handle(transcribe(10), g.e, store, new Date(now.getTime() + DAY), g.fetcher)).status).toBe(402);
+        expect(g.asked).toHaveLength(1);
+      }
+    });
+
     it("doesn't ask on every call about a revoked one whose expiry is still ahead", async () => {
       const g = await googleSays("EXPIRED", later);
       const { store } = memoryStore({ free: 1800, sub: { ...paid, state: "EXPIRED", checked: now.getTime() } });

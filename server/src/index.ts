@@ -166,9 +166,11 @@ const MAY_RECOVER = ["ACTIVE", "IN_GRACE_PERIOD", "ON_HOLD", "PAUSED", "PENDING"
  * States where Google gives no access, whatever the expiry says (developer.android.com/google/play/
  * billing/lifecycle/subscriptions, checked 2026-11-25): revoked or charged back is EXPIRED, "revoke the
  * user's entitlement immediately" (Revocations); account hold, "block access" (Account hold); paused,
- * "the user doesn't have access" (Paused subscriptions); and sign-ups not paid yet.
+ * "the user doesn't have access" (Paused subscriptions); and sign-ups not paid yet. GONE is this server's word for
+ * one Google stopped knowing while it didn't pay (refreshed): its stored expiry may still be ahead (review, 2026-11-25:
+ * an account hold, pause or unpaid sign-up that Google then answered 410 for was served paid hours until that expiry).
  */
-const NOT_PAID = ["EXPIRED", "ON_HOLD", "PAUSED", "PENDING", "PENDING_PURCHASE_CANCELED"];
+const NOT_PAID = ["EXPIRED", "ON_HOLD", "PAUSED", "PENDING", "PENDING_PURCHASE_CANCELED", "GONE"];
 
 /**
  * Whether [sub] pays now: before its expiry, which Google moves forward on each renewal and during
