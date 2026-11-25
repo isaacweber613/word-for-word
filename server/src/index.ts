@@ -55,9 +55,10 @@
  *   GET /.well-known/assetlinks.json   for nuchemweber.com (route in wrangler.jsonc), so Android opens
  *                            the access links (https://nuchemweber.com/wordforword/a/?c=...) in the app.
  *
- * The Worker in front of the Yiddish model asks this server before each of the app's Yiddish takes
- * and counts the take afterwards, through the RPC entrypoint in worker.ts (yiddishCheck and
- * yiddishCharge below), which isn't on the internet.
+ * The Worker in front of the Yiddish model asks this server before each of the app's Yiddish takes,
+ * which holds the take's time, and counts the take afterwards by the length the model server
+ * measured, through the RPC entrypoint in worker.ts (yiddishCheck, yiddishCharge, yiddishRelease and
+ * yiddishRefund below), which isn't on the internet.
  */
 
 import { decodeIntegrity, PACKAGE, productState, verify, VOIDED_WINDOW_MS, voidedPurchases, type IntegrityPayload,
@@ -620,7 +621,11 @@ export async function handle(request: Request, env: Env, store: Store, now = new
 /** How many plan seconds a second of Yiddish audio counts for (AGENTS.local.md). */
 export const YIDDISH_WEIGHT = 2;
 
-export type CheckAnswer = { ok: true } | { ok: false; status: number; code: string; message: string };
+/** [held]: seconds of sound the take's hold covers (only when it was held), the most the model server may type. */
+export type CheckAnswer = { ok: true; held?: number } | { ok: false; status: number; code: string; message: string };
+
+/** D1's error for a table that isn't there yet (yiddish_takes is added by hand before a deploy, schema.sql). */
+const noTable = (e: unknown) => /no such table/i.test(String((e as Error | null)?.message ?? e));
 
 /**
  * Whether the app's Yiddish take may go to the Yiddish model (Isaac, 2026-11-24: "I don't want
@@ -629,11 +634,23 @@ export type CheckAnswer = { ok: true } | { ok: false; status: number; code: stri
  * whatever REQUIRE_INTEGRITY says) with time left in the same free minutes and hours as
  * everything else. Builds not from Google Play never get a token, so they get Yiddish only with an
  * access code ([rawCode], from the Access page), which also stands in for the token.
+ *
+ * With [hold] (the yiddishtry Worker's id for the take and its length as the Worker estimated it from its size), the
+ * take's time is also held before it is sent (review, 2026-11-25: checked once before and counted after, every take
+ * started on a phone's last second was typed, on the paid cloud copy when the PC was busy, and counted past the
+ * phone's hours). The hold is the length in whole seconds and one more (as yiddishvoicetotext.com's needFor holds a
+ * file), twice over, all of it on the first of the phone's hours with that much left, in one statement, so takes at
+ * the same moment can't share the last seconds. A take that doesn't fit is refused before it is sent, so a phone is
+ * never typed more than its hours can pay. The answer's [held] goes to the model server (x-max-seconds), which
+ * refuses a longer take before typing it; yiddishCharge then counts what the model server measured in place of the
+ * hold, or yiddishRelease gives the hold back. Without [hold] (a yiddishtry Worker from before holds) or without the
+ * table, this only checks, as before.
  */
 export async function yiddishCheck(env: Env, store: Store, device: unknown, token: unknown,
                                    now = new Date(), rawCode: unknown = null,
                                    fetcher: typeof fetch = fetch,
-                                   defer?: (work: Promise<unknown>) => unknown): Promise<CheckAnswer> {
+                                   defer?: (work: Promise<unknown>) => unknown,
+                                   hold?: { take: unknown; seconds: unknown }): Promise<CheckAnswer> {
   if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) {
     return { ok: false, status: 400, code: "no_device", message: "Missing device ID." };
   }
@@ -648,15 +665,39 @@ export async function yiddishCheck(env: Env, store: Store, device: unknown, toke
     return { ok: false, status: 403, code: "device_unverified", message: "Google Play couldn't confirm this phone." };
   }
   // Without Google Play's word for the phone, only the given hours count, not its free minutes.
-  if (vouched ? choose(a, now.getTime(), free) : grantLeft(a.grant)) return { ok: true };
+  const options = choices(a, now.getTime(), free, !vouched);
+  const take = hold?.take, estimate = hold?.seconds;
+  if (options.length && typeof take === "string" && take && typeof estimate === "number" && estimate >= 0 && Number.isFinite(estimate)) {
+    const sound = Math.ceil(estimate) + 1;
+    try {
+      for (const p of options) {
+        if (await store.holdTake(take, device, monthOf(now), p.bucket, sound * YIDDISH_WEIGHT, limitOf(p.bucket, a, free), a.sub,
+                                 a.grant, now.getTime())) return { ok: true, held: sound };
+      }
+    } catch (e) {
+      if (!noTable(e)) throw e;
+      return { ok: true };
+    }
+  } else if (options.length) return { ok: true };
   const out = await outOfTime(a, now.getTime(), free).json() as { error: { message: string; code: string } };
   return { ok: false, status: 402, code: out.error.code, message: out.error.message };
 }
 
-/** Counts [seconds] of audio the Yiddish model typed, at YIDDISH_WEIGHT, on whatever pays next. */
+/**
+ * Counts [seconds] of audio the Yiddish model typed, at YIDDISH_WEIGHT. A take yiddishCheck held ([take]) is counted
+ * the length the model server measured in place of its hold, once, keeping [job] for a shared file so its failure can
+ * give it back (yiddishRefund). Otherwise (a yiddishtry Worker from before holds) on whatever pays next.
+ */
 export async function yiddishCharge(env: Env, store: Store, device: unknown, seconds: unknown,
-                                    now = new Date(), rawCode: unknown = null): Promise<void> {
+                                    now = new Date(), rawCode: unknown = null, take: unknown = null,
+                                    job: unknown = null): Promise<void> {
   if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) return;
+  if (typeof take === "string" && take) {
+    if (typeof seconds === "number" && seconds >= 0 && Number.isFinite(seconds)) {
+      await store.settleTake(take, seconds * YIDDISH_WEIGHT, typeof job === "string" && job ? job : null);
+    } else await store.releaseTake(take);
+    return;
+  }
   if (typeof seconds !== "number" || !(seconds > 0)) return;
   const month = monthOf(now);
   const a = await store.account(device, month, accessCode(typeof rawCode === "string" ? rawCode : null));
@@ -664,6 +705,20 @@ export async function yiddishCharge(env: Env, store: Store, device: unknown, sec
   // Nothing left now: the take was allowed when it started, so it still counts.
   const bucket = pick?.bucket ?? (a.grant ? "grant" : subscribed(a.sub, now.getTime()) ? "sub" : "free");
   await store.charge(device, month, bucket, seconds * YIDDISH_WEIGHT, a.sub, a.grant);
+}
+
+/** Gives back what yiddishCheck held for [take], once: the take wasn't typed (refused, failed, or nobody answered). */
+export async function yiddishRelease(store: Store, take: unknown): Promise<void> {
+  if (typeof take === "string" && take) await store.releaseTake(take);
+}
+
+/**
+ * Gives back what a shared file was counted when its job started, once, when the model server says that job [job]
+ * failed (the yiddishtry Worker sees it in the job's status). A job never counted here, such as the try page's,
+ * changes nothing.
+ */
+export async function yiddishRefund(store: Store, job: unknown): Promise<void> {
+  if (typeof job === "string" && job) await store.refundJob(job);
 }
 
 export default {

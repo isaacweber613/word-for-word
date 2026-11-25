@@ -86,6 +86,22 @@ export interface Store {
    * were taken back.
    */
   takeBackTopups(voided: string[], now: number, since: number, device: string): Promise<number>;
+  /**
+   * Holds [seconds] on [bucket] for the Yiddish take [take] before it is sent, only if all of them fit under [limit]
+   * (null: no limit; bought hours: while that many are left), in one batch with the take's row (table yiddish_takes),
+   * so takes at the same moment can't share the last seconds. False when they don't fit.
+   */
+  holdTake(take: string, device: string, month: string, bucket: Bucket, seconds: number, limit: number | null,
+           sub: Sub | null, grant: Grant | null, now: number): Promise<boolean>;
+  /**
+   * Counts the held take [take] [seconds] in place of its hold, once, with [job] when it is a shared file's job. Bought
+   * hours end at zero, never below. False when it wasn't held or was already counted or given back.
+   */
+  settleTake(take: string, seconds: number, job: string | null): Promise<boolean>;
+  /** Gives back what the take [take] holds, once, when it wasn't typed. */
+  releaseTake(take: string): Promise<boolean>;
+  /** Gives back what the shared file whose job is [job] was counted, once, when that job failed after it started. */
+  refundJob(job: string): Promise<boolean>;
   /** Saves a failed check on the Failed checks list, counting each report. */
   failedCheck(device: string, report: FailedCheck, now: number): Promise<void>;
   /** The phone passed: it leaves the list, unless Isaac gave it hours. */
@@ -100,6 +116,10 @@ function parseModels(json: string | undefined, fallback: ModelChoice[]): ModelCh
   return fallback;
 }
 
+/** A row of yiddish_takes (schema.sql). */
+interface TakeRow { take: string; device: string; month: string; bucket: Bucket; grant_id: number | null; sub_token: string | null;
+                    sub_period: number | null; held: number; charged: number | null; state: string; job: string | null }
+
 export function d1Store(db: D1Database): Store {
   /**
    * Adds [seconds] to the counter row of [table] keyed by [keys]; a negative amount (giving back what reserve
@@ -110,6 +130,24 @@ export function d1Store(db: D1Database): Store {
       ? db.prepare(`UPDATE ${table} SET seconds = seconds + ? WHERE ${keys[0]} = ? AND ${keys[1]} = ?`).bind(seconds, ...values)
       : db.prepare(`INSERT INTO ${table} (${keys[0]}, ${keys[1]}, seconds) VALUES (?, ?, ?) ON CONFLICT (${keys[0]}, ${keys[1]}) ` +
           "DO UPDATE SET seconds = seconds + excluded.seconds").bind(...values, seconds)).run();
+  /**
+   * For a batch: adds [amount] (an expression over the take's own row, this file's text, never input) to the counter
+   * the take [t] is held on, only right after a statement that changed one row: the take's move from one state to the
+   * next, so a call made twice, or after another one, changes nothing. Bought hours count down.
+   */
+  const onTakeCounter = (t: TakeRow, amount: string) => {
+    const of = `(SELECT ${amount} FROM yiddish_takes WHERE take = ?1)`;
+    return t.bucket === "free"
+      ? db.prepare(`UPDATE usage SET seconds = seconds + ${of} WHERE device = ?2 AND month = ?3 AND changes() = 1`).bind(t.take, t.device, t.month)
+      : t.bucket === "grant"
+      ? db.prepare(`UPDATE grant_usage SET seconds = seconds + ${of} WHERE grant_id = ?2 AND month = ?3 AND changes() = 1`).bind(t.take, t.grant_id, t.month)
+      : t.bucket === "sub"
+      ? db.prepare(`UPDATE subscription_usage SET seconds = seconds + ${of} WHERE token = ?2 AND period = ?3 AND changes() = 1`)
+          .bind(t.take, t.sub_token, t.sub_period)
+      : db.prepare(`UPDATE credit SET seconds = seconds - ${of} WHERE device = ?2 AND changes() = 1`).bind(t.take, t.device);
+  };
+  const takeRow = (where: string, value: string) =>
+    db.prepare(`SELECT * FROM yiddish_takes WHERE ${where} = ?`).bind(value).first<TakeRow>();
   return {
     async account(device, month, code) {
       // One round trip for everything a recording needs.
@@ -206,6 +244,59 @@ export function d1Store(db: D1Database): Store {
           .bind(now, since, device),
       ]);
       return results.filter((_, i) => i % 2 === 1 && i < voided.length * 2).reduce((n, r) => n + (r.meta.changes ?? 0), 0);
+    },
+    async holdTake(take, device, month, bucket, seconds, limit, sub, grant, now) {
+      // The counter changes only when all of [seconds] fit (an upsert whose insert and update both check), and the
+      // take's row is written only when it did (changes() is the counter's), in one transaction.
+      const counter =
+        bucket === "free" ? db.prepare("INSERT INTO usage (device, month, seconds) SELECT ?1, ?2, ?3 WHERE ?3 <= ?4 " +
+          "ON CONFLICT (device, month) DO UPDATE SET seconds = seconds + excluded.seconds WHERE usage.seconds + excluded.seconds <= ?4")
+          .bind(device, month, seconds, limit)
+        : bucket === "grant" && grant ? db.prepare("INSERT INTO grant_usage (grant_id, month, seconds) SELECT ?1, ?2, ?3 " +
+          "WHERE ?4 IS NULL OR ?3 <= ?4 ON CONFLICT (grant_id, month) DO UPDATE SET seconds = seconds + excluded.seconds " +
+          "WHERE ?4 IS NULL OR grant_usage.seconds + excluded.seconds <= ?4").bind(grant.id, month, seconds, limit)
+        : bucket === "sub" && sub ? db.prepare("INSERT INTO subscription_usage (token, period, seconds) SELECT ?1, ?2, ?3 WHERE ?3 <= ?4 " +
+          "ON CONFLICT (token, period) DO UPDATE SET seconds = seconds + excluded.seconds " +
+          "WHERE subscription_usage.seconds + excluded.seconds <= ?4").bind(sub.token, sub.period ?? sub.expiry, seconds, limit)
+        : bucket === "credit" ? db.prepare("UPDATE credit SET seconds = seconds - ?1 WHERE device = ?2 AND seconds >= ?1").bind(seconds, device)
+        : null;
+      if (!counter) return false;
+      const [, row] = await db.batch([counter,
+        db.prepare("INSERT INTO yiddish_takes (take, device, month, bucket, grant_id, sub_token, sub_period, held, state, created_at) " +
+          "SELECT ?, ?, ?, ?, ?, ?, ?, ?, 'held', ? WHERE changes() = 1")
+          .bind(take, device, month, bucket, grant?.id ?? null, sub?.token ?? null, sub ? sub.period ?? sub.expiry : null, seconds, now),
+      ]);
+      return (row.meta.changes ?? 0) > 0;
+    },
+    async settleTake(take, seconds, job) {
+      const t = await takeRow("take", take);
+      if (!t || t.state !== "held") return false;
+      // Bought hours: never more than the hold and what is left (they end at zero, as charge does).
+      const [moved] = await db.batch([
+        db.prepare("UPDATE yiddish_takes SET state = 'charged', job = ?2, charged = CASE WHEN bucket = 'credit' " +
+          "THEN min(?1, held + coalesce((SELECT seconds FROM credit WHERE device = yiddish_takes.device), 0)) ELSE ?1 END " +
+          "WHERE take = ?3 AND state = 'held'").bind(seconds, job, take),
+        onTakeCounter(t, "charged - held"),
+      ]);
+      return (moved.meta.changes ?? 0) > 0;
+    },
+    async releaseTake(take) {
+      const t = await takeRow("take", take);
+      if (!t || t.state !== "held") return false;
+      const [moved] = await db.batch([
+        db.prepare("UPDATE yiddish_takes SET state = 'released' WHERE take = ? AND state = 'held'").bind(take),
+        onTakeCounter(t, "-held"),
+      ]);
+      return (moved.meta.changes ?? 0) > 0;
+    },
+    async refundJob(job) {
+      const t = await takeRow("job", job);
+      if (!t || t.state !== "charged") return false;
+      const [moved] = await db.batch([
+        db.prepare("UPDATE yiddish_takes SET state = 'refunded' WHERE take = ? AND state = 'charged'").bind(t.take),
+        onTakeCounter(t, "-charged"),
+      ]);
+      return (moved.meta.changes ?? 0) > 0;
     },
     async failedCheck(device, r, now) {
       await db.prepare("INSERT INTO failed_checks (device, model, android, app_version, reason, first_seen, last_seen, count) " +

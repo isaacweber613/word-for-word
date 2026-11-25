@@ -190,9 +190,8 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   kept its hours; now old top-ups are asked about one by one. Optional, off until Isaac sets them:
   `OPENROUTER_PAID_KEY` (a second key with its own limit for phones that pay, so free or given use reaching
   the main key's limit can't stop subscribers), `MAX_RECORDING_SECONDS`, and the rate limits `DEVICE_LIMITER`
-  and `ADDRESS_LIMITER` (commented in `wrangler.jsonc`). Still open: the Yiddish entrypoint is checked once
-  before a take and counted after it, so many takes at once pass on the last second (an `it.fails` test
-  shows it; the fix needs the yiddishtry Worker to hold and settle too); one rooted phone with the real Play
+  and `ADDRESS_LIMITER` (commented in `wrangler.jsonc`). Yiddish takes on the last second (same day, with
+  yiddish-stt's yiddishtry Worker): see "Yiddish takes" below. Still open: one rooted phone with the real Play
   app can have Play Integrity vouch for any number of made-up device IDs, each with free minutes, since
   basic integrity is enough (Google's optional recent device activity and device recall verdicts are the
   documented answers); anyone can call `/v1/register`, and each call with a token makes one Play Integrity
@@ -335,7 +334,23 @@ Yiddish take sends `X-Device-Id` and `X-Device-Token`, and the `yiddishtry` Work
 server (RPC entrypoint `Yiddish` in `server/src/worker.ts`, service binding `WFW`) while the audio
 is still arriving: the phone needs a device token from Play Integrity, whatever
 `REQUIRE_INTEGRITY` says, and time left in its free minutes or hours, whatever key is typed. A take
-that comes back with words is counted there (`yiddishCheck`, `yiddishCharge`). No phone is exempt
+that comes back with words is counted there (`yiddishCheck`, `yiddishCharge`).
+Holds (review, 2026-11-25, not deployed yet): checked once before and counted after, every take started on a
+phone's last second was typed, on the paid cloud copy when the PC was busy (test/yiddish-e2e.test.ts, the real
+yiddishtry Worker and this server in Miniflare: 4 of 4 takes at once on one second left were typed). Now the
+yiddishtry Worker gives each take an id and its length from its size, and `yiddishCheck` holds that length in whole
+seconds plus one, twice over, all of it on the first hours with that much left, in one statement (table
+`yiddish_takes`); a take that doesn't fit is refused (402, the same codes as before) before it is sent. The Worker
+sends the length held as `x-max-seconds`, so the model server refuses a longer take before typing it, and
+`yiddishCharge` counts what the model server measured (its answer's `seconds`) in place of the hold, once.
+`release` gives back the hold of a take that wasn't typed, `refund` what a shared file's job was counted when the job
+fails later, each once. A yiddishtry Worker from before this only checks and counts after, as before, and without the
+`yiddish_takes` table this server does the same, so either side can go out first; the hole closes once both are out.
+Release: the table, then `server/`, then yiddish-stt's `tryout/worker`. The cloud copy refuses a take longer than its
+hold only once yiddishvoicetotext's PR 1 cloud copy is deployed (`modal deploy backup/modal_app.py`), the PC once
+yiddish-stt PR 2 is merged and the PC's server restarted; until then a take whose size understates its length is
+typed whole and counted all of it. Installed apps need nothing new: the last take of the month that doesn't fit what
+is left is refused with the out-of-time message, where before it was typed. No phone is exempt
 (Isaac, same day: "I don't want mine to be different than everyone's"). GitHub builds never get a
 device token, so they don't offer Yiddish takes (`YiddishServer.available`); Yiddish is a normal
 language for the cloud model there. Apps before 0.9.14 send no device ID and get 503, which they

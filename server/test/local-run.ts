@@ -31,7 +31,7 @@ function schemaStatements(): string[] {
 }
 
 export const TABLES = ["usage", "models", "subscriptions", "subscription_devices", "subscription_usage", "credit",
-  "topups", "grants", "grant_usage", "failed_checks"];
+  "topups", "grants", "grant_usage", "failed_checks", "yiddish_takes"];
 
 /** What the stand-ins answer. Each test sets what it needs; the rest answer like a quiet, working service. */
 export interface StandIns {
@@ -67,7 +67,7 @@ export interface LocalServer {
   /** A request to the server, as the app sends it. */
   fetch(path: string, init?: { method?: string; headers?: Record<string, string>; body?: unknown }): Promise<Response>;
   /** The Yiddish entrypoint (worker.ts), called the way the yiddishtry Worker calls it through its service binding. */
-  yiddish(method: "check" | "charge", ...args: unknown[]): Promise<unknown>;
+  yiddish(method: "check" | "charge" | "release" | "refund", ...args: unknown[]): Promise<unknown>;
   /** Empties every table and the list of calls, and puts the stand-ins back to their defaults. */
   reset(): Promise<void>;
   /** Waits for work the Worker does after answering (ctx.waitUntil) until [check] is true. */
@@ -83,8 +83,12 @@ const quiet = (): StandIns => ({
   integrity: () => Response.json({ error: { message: "bad token" } }, { status: 400 }),
 });
 
-/** Starts the server with [vars] on top of the live ones in wrangler.jsonc, plus test secrets. */
-export async function startLocal(vars: Record<string, string> = {}, extra: Record<string, unknown> = {}): Promise<LocalServer> {
+/**
+ * Starts the server with [vars] on top of the live ones in wrangler.jsonc, plus test secrets. [others]: more Workers
+ * in the same run (Miniflare options), such as the real yiddishtry Worker in yiddish-e2e.test.ts.
+ */
+export async function startLocal(vars: Record<string, string> = {}, extra: Record<string, unknown> = {},
+                                 others: Record<string, unknown>[] = []): Promise<LocalServer> {
   const calls: Call[] = [];
   const stand: StandIns = quiet();
   // Miniflare 5 takes its own options shape; convertV4MiniflareOptions reads the documented one.
@@ -131,7 +135,7 @@ export async function startLocal(vars: Record<string, string> = {}, extra: Recor
     serviceBindings: { WFW: { name: "word-for-word", entrypoint: "Yiddish" } },
     script: "export default { async fetch(request, env) { const { method, args } = await request.json(); " +
       "return Response.json((await env.WFW[method](...args)) ?? null); } }",
-  }] } as Parameters<typeof convertV4MiniflareOptions>[0]));
+  }, ...others] } as Parameters<typeof convertV4MiniflareOptions>[0]));
   const db = await mf.getD1Database("DB") as unknown as D1Database;
   for (const s of schemaStatements()) await db.prepare(s).run();
   return {

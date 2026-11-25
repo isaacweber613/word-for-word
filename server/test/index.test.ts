@@ -83,6 +83,11 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
     },
     async failedCheck(d, r) { s.failed.set(d, { ...r, count: (s.failed.get(d)?.count ?? 0) + 1 }); },
     async passedCheck(d) { if (s.grant?.device !== d) s.failed.delete(d); },
+    // Yiddish holds run on the real tables only (local.test.ts).
+    holdTake: () => { throw new Error("not in the memory store"); },
+    settleTake: () => { throw new Error("not in the memory store"); },
+    releaseTake: () => { throw new Error("not in the memory store"); },
+    refundJob: () => { throw new Error("not in the memory store"); },
   };
   return { s, store };
 }

@@ -2,6 +2,7 @@
  * Attacks on a local run of the server (local-run.ts): the real Worker and a local D1 database, with
  * stand-ins for Google and OpenRouter. Review of 2026-11-25; each test failed before its fix.
  */
+import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { d1Store } from "../src/store";
 import { deviceId, deviceToken, phone, recording, startLocal, type LocalServer } from "./local-run";
@@ -89,14 +90,134 @@ describe("a local run of the server", () => {
       expect(res.status).toBe(200);
     });
 
-    // Not fixed by this server alone: the yiddishtry Worker (yiddish-stt tryout/worker) asks check once before a take
-    // and calls charge after it, and has no way to hold time and give it back. This test fails, as it.fails expects,
-    // until that Worker holds and settles each take the way recordings now do.
-    it.fails("can't start many Yiddish takes on the last second of a phone's free minutes", async () => {
-      const d = deviceId(30);
-      await server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, 1799)").bind(d, month()).run();
-      const answers = await Promise.all(Array.from({ length: 5 }, () => server.yiddish("check", d, deviceToken(d), null)));
-      expect(answers.filter((x) => (x as { ok: boolean }).ok)).toHaveLength(1);
+    describe("Yiddish takes, held before they are sent (the yiddishtry Worker's calls)", () => {
+      let n = 0;
+      const takeId = () => `00000000-0000-4000-8000-${String(++n).padStart(12, "0")}`;
+      const freeUsed = (d: string) => server.db.prepare("SELECT seconds FROM usage WHERE device = ? AND month = ?").bind(d, month())
+        .first<{ seconds: number }>().then((r) => r?.seconds ?? 0);
+      const used = (d: string, seconds: number) =>
+        server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, ?)").bind(d, month(), seconds).run();
+      const check = (d: string, take: string, seconds: number) =>
+        server.yiddish("check", d, deviceToken(d), null, take, seconds) as Promise<{ ok: boolean; held?: number; code?: string }>;
+
+      it("lets no take through when several start at once on a phone's last second", async () => {
+        const d = deviceId(30);
+        await used(d, 1799);
+        const answers = await Promise.all(Array.from({ length: 5 }, () => check(d, takeId(), 10)));
+        expect(answers.map((x) => x.ok)).toEqual([false, false, false, false, false]);
+        expect(answers[0]).toMatchObject({ status: 402, code: "free_minutes_used" });
+        expect(await freeUsed(d)).toBe(1799);
+      });
+
+      it("holds one take of several at once when there is room for one, and counts what the model server measured, once", async () => {
+        const d = deviceId(31);
+        await used(d, 1775);   // 25 plan seconds left; a 10 s take holds 11 s of sound, 22 plan seconds
+        const takes = Array.from({ length: 5 }, takeId);
+        const answers = await Promise.all(takes.map((t) => check(d, t, 10)));
+        expect(answers.filter((x) => x.ok)).toEqual([{ ok: true, held: 11 }]);
+        expect(await freeUsed(d)).toBe(1797);
+        const held = takes[answers.findIndex((x) => x.ok)];
+        await server.yiddish("charge", d, 10, null, held);
+        expect(await freeUsed(d)).toBe(1795);
+        // Counted once: the same call again, or a give-back after it, changes nothing.
+        await server.yiddish("charge", d, 10, null, held);
+        await server.yiddish("release", held);
+        expect(await freeUsed(d)).toBe(1795);
+      });
+
+      it("gives a hold back once when the take wasn't typed", async () => {
+        const d = deviceId(32);
+        const t = takeId();
+        expect(await check(d, t, 10)).toEqual({ ok: true, held: 11 });
+        expect(await freeUsed(d)).toBe(22);
+        await server.yiddish("release", t);
+        await server.yiddish("release", t);
+        await server.yiddish("charge", d, 10, null, t);
+        expect(await freeUsed(d)).toBe(0);
+      });
+
+      it("holds a take whole on the next hours when the free minutes can't hold all of it", async () => {
+        const d = deviceId(33), now = Date.now(), period = now + 20 * DAY;
+        await used(d, 1790);
+        await server.db.batch([
+          server.db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES ('s33', 'monthly', ?, 'ACTIVE', ?, ?)")
+            .bind(period, now, period),
+          server.db.prepare("INSERT INTO subscription_devices (device, token) VALUES (?, 's33')").bind(d),
+        ]);
+        const t = takeId();
+        expect(await check(d, t, 10)).toEqual({ ok: true, held: 11 });
+        await server.yiddish("charge", d, 10, null, t);
+        expect(await freeUsed(d)).toBe(1790);
+        expect((await server.db.prepare("SELECT seconds FROM subscription_usage WHERE token = 's33'").first<{ seconds: number }>())!.seconds).toBe(20);
+      });
+
+      it("counts bought hours down to zero, never below, even for a take longer than its hold", async () => {
+        const d = deviceId(34), now = Date.now(), period = now + 20 * DAY;
+        await used(d, 1800);
+        await server.db.batch([
+          server.db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES ('s34', 'monthly', ?, 'ACTIVE', ?, ?)")
+            .bind(period, now, period),
+          server.db.prepare("INSERT INTO subscription_devices (device, token) VALUES (?, 's34')").bind(d),
+          server.db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES ('s34', ?, 36000)").bind(period),
+          server.db.prepare("INSERT INTO credit (device, seconds) VALUES (?, 30)").bind(d),
+        ]);
+        const credit = () => server.db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(d).first<{ seconds: number }>().then((r) => r!.seconds);
+        expect(await check(d, takeId(), 20)).toMatchObject({ ok: false, code: "hours_used" });   // 42 plan seconds don't fit in 30
+        const t = takeId();
+        expect(await check(d, t, 10)).toEqual({ ok: true, held: 11 });
+        expect(await credit()).toBe(8);
+        // A PC whose server.py doesn't know x-max-seconds typed 20 s: all that is left goes, and no more.
+        await server.yiddish("charge", d, 20, null, t, "j34");
+        expect(await credit()).toBe(0);
+        await server.yiddish("refund", "j34");
+        expect(await credit()).toBe(30);
+      });
+
+      it("gives a shared file back once when its job fails after it was counted", async () => {
+        const d = deviceId(35);
+        const t = takeId();
+        expect(await check(d, t, 5)).toEqual({ ok: true, held: 6 });
+        await server.yiddish("charge", d, 5, null, t, "cloud-job35");
+        expect(await freeUsed(d)).toBe(10);
+        for (let i = 0; i < 3; i++) await server.yiddish("refund", "cloud-job35");
+        await server.yiddish("refund", "cloud-someone-else");
+        expect(await freeUsed(d)).toBe(0);
+        // A take that was only held, never counted, has nothing to give back through refund.
+        const u = takeId();
+        await check(d, u, 5);
+        await server.yiddish("refund", "cloud-job35");
+        expect(await freeUsed(d)).toBe(12);
+      });
+
+      it("lets the given hours of a code hold a take for a phone Google Play never vouched for", async () => {
+        await server.db.prepare("INSERT INTO grants (id, who, code, seconds, created_at) VALUES (1, 'Friend', 'K7QM4XPA9TRW', 3600, 0)").run();
+        await server.db.prepare("INSERT INTO grant_usage (grant_id, month, seconds) VALUES (1, ?, 3590)").bind(month()).run();
+        const phoneWithCode = (n: number, take: string) =>
+          server.yiddish("check", deviceId(n), null, "K7QM-4XPA-9TRW", take, 4) as Promise<{ ok: boolean; held?: number }>;
+        const answers = await Promise.all([phoneWithCode(36, takeId()), phoneWithCode(37, takeId()), phoneWithCode(38, takeId())]);
+        expect(answers.filter((x) => x.ok)).toEqual([{ ok: true, held: 5 }]);   // 10 plan seconds left, each holds 10
+        expect(await freeUsed(deviceId(36)) + await freeUsed(deviceId(37)) + await freeUsed(deviceId(38))).toBe(0);
+      });
+
+      it("still serves a yiddishtry Worker from before holds: it only checks, and counts on what pays after", async () => {
+        const d = deviceId(39);
+        await used(d, 1799);
+        expect(await server.yiddish("check", d, deviceToken(d), null)).toEqual({ ok: true });
+        await server.yiddish("charge", d, 30, null);
+        expect(await freeUsed(d)).toBe(1859);
+      });
+
+      it("checks and counts as before when the yiddish_takes table isn't there yet", async () => {
+        const d = deviceId(40);
+        await server.db.prepare("DROP TABLE yiddish_takes").run();
+        try {
+          expect(await check(d, takeId(), 10)).toEqual({ ok: true });
+          expect(await freeUsed(d)).toBe(0);
+        } finally {
+          const schema = readFileSync(new URL("../schema.sql", import.meta.url), "utf8");
+          for (const s of schema.match(/CREATE (TABLE|INDEX) IF NOT EXISTS yiddish_takes[^;]+/g)!) await server.db.prepare(s).run();
+        }
+      });
     });
 
     it("gives back what a recording held when no model typed it", async () => {
