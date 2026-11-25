@@ -52,8 +52,8 @@ CREATE TABLE IF NOT EXISTS topups (
 );
 
 -- People Isaac gives hours to without a subscription (yiddishvoicetotext.com, Access tab; that site's
--- src/access.js writes this table). who is a Google email (the Play app signs in with Google and gets the
--- code) or a name for someone on a GitHub build, who types the code. seconds is plan seconds a month;
+-- src/access.js writes this table). who is the name Isaac typed; the person gets a link with the code.
+-- seconds is plan seconds a month;
 -- NULL is unlimited. code is the access code without dashes.
 CREATE TABLE IF NOT EXISTS grants (
   id INTEGER PRIMARY KEY,

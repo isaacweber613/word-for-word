@@ -40,8 +40,6 @@ export interface Store {
   /** [code] is the access code the call carried (normalized, see accessCode), or null. */
   account(device: string, month: string, code?: string | null): Promise<Account>;
   charge(device: string, month: string, bucket: Bucket, seconds: number, sub: Sub | null, grant?: Grant | null): Promise<void>;
-  /** The access code given to [email] (a Google email), or null when no hours were given to it. */
-  codeFor(email: string): Promise<string | null>;
   saveSubscription(device: string, sub: Sub): Promise<void>;
   /** Adds a bought top-up once. False when this purchase was already counted. */
   addTopup(token: string, device: string, seconds: number, now: number): Promise<boolean>;
@@ -93,10 +91,6 @@ export function d1Store(db: D1Database): Store {
       } else if (bucket === "credit") {
         await db.prepare("UPDATE credit SET seconds = max(0, seconds - ?) WHERE device = ?").bind(seconds, device).run();
       }
-    },
-    async codeFor(email) {
-      const r = await db.prepare("SELECT code FROM grants WHERE lower(who) = lower(?)").bind(email).first<{ code: string }>();
-      return r?.code ?? null;
     },
     async saveSubscription(device, sub) {
       await db.batch([

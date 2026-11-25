@@ -231,9 +231,11 @@ class MainActivity : AppCompatActivity() {
         planRow.visibility = if (Billing.available) View.VISIBLE else View.GONE
         root.addView(planRow)
 
-        // Hours someone gave you on the access page (Access): Google sign-in in the Play build, a typed code elsewhere.
-        accessRow = settingsRow(if (GoogleAccount.available) "Sign in with Google" else "Access code", "") { onAccessTap() }
+        // Hours someone gave you (Access): everyone gets them by tapping their link; the GitHub builds
+        // can also type the code here. The Play build shows no row (Isaac, 2026-11-24).
+        accessRow = settingsRow("Access code", "") { onAccessTap() }
         accessRowSub = accessRow.findViewWithTag("subtitle")
+        accessRow.visibility = if (BuildConfig.FLAVOR == "play") View.GONE else View.VISIBLE
         root.addView(accessRow)
 
         val keyRow = settingsRow("OpenRouter API Key", "Tap to set") { promptApiKey() }
@@ -335,6 +337,7 @@ class MainActivity : AppCompatActivity() {
 
         // The setup walkthrough (maybeRunSetup) asks for the microphone, so no request here.
         refresh()
+        useAccessLink(intent)
         // A subscription bought on another phone, or a month that renewed, reaches the server.
         if (Billing.available && FreeMinutes.inUse(this)) Billing.sync(this) { runOnUiThread { if (!isFinishing) refresh() } }
     }
@@ -529,35 +532,42 @@ class MainActivity : AppCompatActivity() {
     private lateinit var accessRow: View
     private lateinit var accessRowSub: TextView
 
-    private fun onAccessTap() {
-        val done: (Access.Answer) -> Unit = { answer ->
-            runOnUiThread {
-                if (isFinishing) return@runOnUiThread
+    /** Shows how a code (typed or from a link) went, then updates the screen. */
+    private val accessDone: (Access.Answer) -> Unit = { answer ->
+        runOnUiThread {
+            if (!isFinishing) {
                 android.app.AlertDialog.Builder(this)
-                    .setMessage(answer.error ?: "You're using the hours given to ${answer.who}.")
+                    .setMessage(answer.error ?: "Done. Your hours are ready to use.")
                     .setPositiveButton("OK", null).show()
                 loadFreeMinutes()
                 refresh()
             }
         }
-        val who = Access.who(this)
+    }
+
+    /** A tapped access link (Access.LINK) opens this screen with the code. */
+    private fun useAccessLink(intent: Intent?) {
+        val code = Access.codeIn(intent?.data) ?: return
+        intent?.data = null
+        Access.useCode(this, code, accessDone)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        useAccessLink(intent)
+    }
+
+    private fun onAccessTap() {
+        val done = accessDone
         if (Access.code(this) != null) {
             android.app.AlertDialog.Builder(this)
-                .setMessage("Stop using the hours given to $who on this phone?")
+                .setMessage("Stop using these hours on this phone?")
                 .setPositiveButton("Stop") { _, _ ->
                     Access.clear(this)
-                    GoogleAccount.signOut(this)
                     refresh()
                 }
                 .setNegativeButton("Cancel", null)
                 .show()
-        } else if (GoogleAccount.available) {
-            GoogleAccount.signIn(this) { idToken, error ->
-                when {
-                    idToken != null -> Access.useGoogle(this, idToken, done)
-                    error != null -> done(Access.Answer(null, error))
-                }
-            }
         } else {
             val input = android.widget.EditText(this).apply {
                 hint = "XXXX-XXXX-XXXX"
@@ -901,12 +911,7 @@ class MainActivity : AppCompatActivity() {
                 else -> "10 hours of dictation a month for \$3"
             }
         }
-        val accessWho = Access.who(this)
-        accessRowSub.text = when {
-            Access.code(this) == null -> "To use hours someone gave you"
-            GoogleAccount.available -> "Signed in as $accessWho"
-            else -> "Using the hours given to $accessWho"
-        }
+        accessRowSub.text = if (Access.code(this) == null) "To use hours someone gave you" else "In use"
         keyRowSub.text = if (apiKey.isBlank() && (Access.code(this) != null ||
                                 FreeMinutes.available && FreeMinutes.subscribed(this))) "Optional"
                          else if (apiKey.isBlank() && FreeMinutes.available) freeMinutesText

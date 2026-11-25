@@ -31,6 +31,21 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- An access link with hours someone gave you (Access.kt). Verified with
+                 nuchemweber.com/.well-known/assetlinks.json, which the server Worker answers. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="nuchemweber.com" android:pathPrefix="/wordforword/a" />
+            </intent-filter>
+            <!-- The same link's page button, when the link opened in the browser. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="wordforword" android:host="a" />
+            </intent-filter>
         </activity>
 
         <activity

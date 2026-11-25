@@ -29,7 +29,6 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
       else if (bucket === "sub") s.subUsed += seconds;
       else s.credit = Math.max(0, s.credit - seconds);
     },
-    async codeFor(email) { return s.grant && s.grant.who.toLowerCase() === email ? s.grant.code : null; },
     async saveSubscription(_d, sub) { s.sub = sub; },
     async addTopup(token, _d, seconds) {
       if (s.topups.has(token)) return false;
@@ -332,47 +331,11 @@ describe("transcription server", () => {
       expect(await yiddishCheck(e, b.store, device, null, now, "AAAABBBBCCCC")).toMatchObject({ ok: false, status: 403 });
     });
 
-    describe("Google sign-in", () => {
-      const CLIENT = "web-client.apps.googleusercontent.com";
-      async function signer() {
-        const { generateKeyPairSync, createSign } = await import("node:crypto");
-        const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-        const kid = Math.random().toString(36).slice(2);
-        const jwk = { ...publicKey.export({ format: "jwk" }), kid, alg: "RS256", use: "sig" };
-        const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
-        const token = (claims: Record<string, unknown>) => {
-          const unsigned = b64({ alg: "RS256", kid, typ: "JWT" }) + "." + b64(claims);
-          return unsigned + "." + createSign("RSA-SHA256").update(unsigned).sign(privateKey).toString("base64url");
-        };
-        const google = (async () => Response.json({ keys: [jwk] }, { headers: { "cache-control": "max-age=60" } })) as unknown as typeof fetch;
-        return { token, google };
-      }
-      const exp = Math.floor(now.getTime() / 1000) + 600;
-      const good = { iss: "https://accounts.google.com", aud: CLIENT, exp, email: "Friend@gmail.com", email_verified: true };
-      const signIn = (t: string) => new Request("https://example.com/v1/access/google", { method: "POST", body: JSON.stringify({ id_token: t }) });
-      const e = { ...env, GOOGLE_WEB_CLIENT_ID: CLIENT } as Env;
-
-      it("gives a signed-in person the code for hours given to their Google email", async () => {
-        const { token, google } = await signer();
-        const a = memoryStore({ grant: { code: CODE, who: "friend@gmail.com", seconds: null } });
-        const res = await handle(signIn(token(good)), e, a.store, now, google);
-        expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ code: CODE, who: "friend@gmail.com" });
-      });
-
-      it("refuses an email with no hours, a token for another app, an expired or unverified one, or a forged one", async () => {
-        const { token, google } = await signer();
-        const a = memoryStore({ grant: { code: CODE, who: "friend@gmail.com", seconds: null } });
-        const none = await handle(signIn(token({ ...good, email: "stranger@gmail.com" })), e, a.store, now, google);
-        expect(none.status).toBe(404);
-        expect((await none.json() as { error: { code: string } }).error.code).toBe("no_access");
-        for (const bad of [{ ...good, aud: "other" }, { ...good, exp: exp - 1200 }, { ...good, email_verified: false },
-          { ...good, iss: "evil" }]) {
-          expect((await handle(signIn(token(bad)), e, a.store, now, google)).status).toBe(403);
-        }
-        const forged = (await signer()).token(good);
-        expect((await handle(signIn(forged), e, a.store, now, google)).status).toBe(403);
-      });
+    it("answers the app links file for Android", async () => {
+      const res = await handle(new Request("https://nuchemweber.com/.well-known/assetlinks.json"), env, memoryStore().store, now, ok);
+      const links = await res.json() as { target: { package_name: string; sha256_cert_fingerprints: string[] } }[];
+      expect(links[0].target.package_name).toBe("com.isaacweber.wordforword");
+      expect(links[0].target.sha256_cert_fingerprints).toHaveLength(2);
     });
   });
 

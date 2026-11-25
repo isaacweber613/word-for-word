@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<!-- An access link (app Access.kt): with Word for Word installed, Android opens the app instead of this
+     page. Shown when the app isn't installed, or the link opened in a browser anyway. -->
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Your Word for Word hours</title>
+<style>
+body { max-width: 520px; margin: 0 auto; padding: 40px 24px; font: 17px/1.6 system-ui, sans-serif; color: #20212b; background: #fff; }
+h1 { font-size: 26px; line-height: 1.25; margin: 0 0 12px; }
+a.btn { display: block; margin: 14px 0; padding: 14px 18px; border-radius: 12px; text-align: center; text-decoration: none; font-weight: 600; }
+.main { background: #4338ca; color: #fff; } .alt { border: 1px solid #c7c9d6; color: #20212b; }
+</style>
+<main>
+<h1>Your Word for Word hours</h1>
+<p>Install Word for Word, then tap your link again.</p>
+<a class="btn main" id="open" href="#">Open in Word for Word</a>
+<a class="btn alt" href="https://play.google.com/store/apps/details?id=com.isaacweber.wordforword">Get it on Google Play</a>
+<a class="btn alt" href="https://github.com/isaacweber613/word-for-word/releases">Download from GitHub</a>
+</main>
+<script>
+var c = (new URLSearchParams(location.search).get("c") || "").replace(/[^A-Za-z0-9]/g, "");
+document.getElementById("open").href = "wordforword://a/" + c;
+</script>
+</html>

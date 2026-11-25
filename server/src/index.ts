@@ -34,19 +34,20 @@
  *
  * Hours given without a subscription (Isaac, 2026-11-24: "Make me a way to give access, for people,
  * without subscribing"): on yiddishvoicetotext.com, Access, Isaac gives a person any number of hours a
- * month or unlimited (table grants). Each person has an access code. The GitHub builds take it typed in
- * Settings; the Play app gets it by signing in with Google (POST /v1/access/google), so it goes by the
- * Google email. Every call with the code (header X-Access-Code) uses those hours first, on every phone
- * that has it. They reset each UTC month like the free minutes. A call with a valid code doesn't need a
- * device token, since GitHub builds can't get one; the code is the proof.
- *   POST /v1/access/google   {"id_token"}: a Google ID token. Answers {"code", "who"}, or 404 code no_access.
+ * month or unlimited (table grants). Each person has an access code and a link with it; tapping the
+ * link opens the app, which keeps the code (GitHub builds can also type it). Every call with the code
+ * (header X-Access-Code) uses those hours first, on every phone that has it. They reset each UTC month
+ * like the free minutes. A call with a valid code doesn't need a device token, since GitHub builds can't
+ * get one; the code is the proof.
+ *   GET /.well-known/assetlinks.json   for nuchemweber.com (route in wrangler.jsonc), so Android opens
+ *                            the access links (https://nuchemweber.com/wordforword/a/?c=...) in the app.
  *
  * The Worker in front of the Yiddish model asks this server before each of the app's Yiddish takes
  * and counts the take afterwards, through the RPC entrypoint in worker.ts (yiddishCheck and
  * yiddishCharge below), which isn't on the internet.
  */
 
-import { decodeIntegrity, googleEmail, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
+import { decodeIntegrity, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
 import { d1Store, type Account, type Bucket, type Grant, type ModelChoice, type Store } from "./store";
 
 export interface Env {
@@ -59,8 +60,6 @@ export interface Env {
   DEVICE_TOKEN_SECRET?: string;
   /** "true" once every call must carry a device token from /v1/register. */
   REQUIRE_INTEGRITY?: string;
-  /** The OAuth web client ID the Play app's "Sign in with Google" asks ID tokens for. */
-  GOOGLE_WEB_CLIENT_ID?: string;
 }
 
 /** The Play products (Play Console, Monetize). */
@@ -120,6 +119,18 @@ export function planSeconds(responseText: string, base64: string, format: string
   } catch { /* fall through */ }
   return audioSeconds(responseText, base64, format) * Math.max(1, (model.per_hour ?? base) / base);
 }
+
+/**
+ * Lets Android open access links in the app without asking (developer.android.com/training/app-links):
+ * the Play signing key (Play Console, App signing) and the debug key the GitHub builds are signed with.
+ */
+export const ASSET_LINKS = [{
+  relation: ["delegate_permission/common.handle_all_urls"],
+  target: { namespace: "android_app", package_name: PACKAGE, sha256_cert_fingerprints: [
+    "BC:1E:48:02:CE:65:93:3E:45:B8:C8:91:E6:35:48:1D:96:EE:A8:9E:DD:97:7D:1D:4A:6F:EA:D3:94:3F:2C:ED",
+    "90:79:A6:C7:E6:E9:72:77:33:3F:A5:92:8B:24:73:F6:F4:0F:00:22:FD:AF:50:14:CC:3D:25:F4:56:F5:BE:1A",
+  ] },
+}];
 
 /** True while a grant has time left this month (unlimited always does). */
 export function grantLeft(g: Grant | null): boolean {
@@ -254,21 +265,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     return Response.json({ device_token: await deviceToken(env.DEVICE_TOKEN_SECRET, device) });
   }
 
-  if (url.pathname === "/v1/access/google" && request.method === "POST") {
-    if (!env.GOOGLE_WEB_CLIENT_ID) return error(503, "Google sign-in isn't set up yet.");
-    const { id_token: idToken } = await request.json().catch(() => ({})) as { id_token?: unknown };
-    if (typeof idToken !== "string" || !idToken) return error(400, "Missing ID token.");
-    let email: string | null;
-    try {
-      email = await googleEmail(idToken, env.GOOGLE_WEB_CLIENT_ID, fetcher, now.getTime());
-    } catch {
-      return error(503, "Google didn't answer. Try again.");
-    }
-    if (!email) return error(403, "Google couldn't confirm this account. Try again.", "google_unverified");
-    const found = await store.codeFor(email);
-    if (!found) return error(404, "No hours were given to " + email + ".", "no_access");
-    return Response.json({ code: found, who: email });
-  }
+  if (url.pathname === "/.well-known/assetlinks.json") return Response.json(ASSET_LINKS);
 
   const code = accessCode(request.headers.get("X-Access-Code"));
   // Loaded before the device check: a valid access code stands in for a device token.

@@ -16,9 +16,9 @@ If you subscribe or buy extra hours in the Play Store build, Google Play takes t
 
 ## Hours given to you
 
-The developer can give a person hours each month without a subscription. Each person gets an access code. In the Play Store build you get it by tapping Sign in with Google in Settings: Google shows its own account picker and gives the app a token that confirms your Google account's email address, name and profile picture. The app sends that token to Word for Word's server, which asks Google's public keys whether it is real and reads only the email address, to look up whether hours were given to it. The server doesn't store the token or anything from it. If hours were given, the app receives the access code and keeps it on your phone. In the GitHub builds you type the code instead.
+The developer can give a person hours each month without a subscription. Each person gets a link with an access code. Tapping the link on your phone opens Word for Word, which checks the code with Word for Word's server and keeps it on your phone. In the GitHub builds you can also type the code in Settings.
 
-The developer's list of people with hours holds the email address or name he typed for each person, their code and their monthly hours. The app sends the code with each recording, and the server stores the time used per code per month. Stopping in Settings removes the code from your phone.
+The developer's list of people with hours holds the name he typed for each person, their code and their monthly hours. The app sends the code with each recording, and the server stores the time used per code per month.
 
 When you share an audio or video file to Word for Word from another app, the app takes its sound on your phone and sends it the same way as a recording. The text is copied to your clipboard and saved in History.
 
@@ -66,7 +66,7 @@ PostHog never receives your recordings, your words, your transcription history, 
 
 ## Data collection
 
-Word for Word has no accounts of its own, no ads, and no crash reporting. Signing in with Google is optional and only for hours given to you. The developer's services process free-minute recordings in transit and retain Yiddish takes and usage records as described above. Your own OpenRouter API key is not sent to the developer's servers.
+Word for Word has no accounts, no ads, and no crash reporting. The developer's services process free-minute recordings in transit and retain Yiddish takes and usage records as described above. Your own OpenRouter API key is not sent to the developer's servers.
 
 Network services, including Cloudflare, OpenRouter, model providers, and PostHog, receive network metadata such as your internet address. Their terms and privacy policies also apply. Analytics retention depends on the hosted PostHog project; this app does not enforce a remote deletion schedule.
 

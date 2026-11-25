@@ -11,11 +11,12 @@
     "FREE_SECONDS_PER_MONTH": "1800",
     // "true": every call needs a device token from Play Integrity (POST /v1/register). Turned on
     // only once the first build that registers (0.9.11) is on every testing track.
-    "REQUIRE_INTEGRITY": "false",
-    // The Play app's "Sign in with Google" (POST /v1/access/google): the web client in Google Cloud project
-    // "Word for Word" (Google Auth Platform, Clients, "Word for Word server"). Public, not a secret.
-    "GOOGLE_WEB_CLIENT_ID": "384040985984-vkab6b8rrj2el3dtkg4i8afsvoc7de9c.apps.googleusercontent.com"
-  }
+    "REQUIRE_INTEGRITY": "false"
+  },
+  // The app's address stays word-for-word.ynbsd6242.workers.dev. The route only answers the access links'
+  // assetlinks.json; the rest of nuchemweber.com is untouched (the app's page is the word-for-word-site Worker).
+  "workers_dev": true,
+  "routes": [{ "pattern": "nuchemweber.com/.well-known/assetlinks.json", "zone_name": "nuchemweber.com" }]
   // Secret, set with `wrangler secret put OPENROUTER_KEY`: an OpenRouter key with a $10 monthly limit.
   // Also GOOGLE_SERVICE_ACCOUNT (the service account's JSON key) and DEVICE_TOKEN_SECRET (random).
 }

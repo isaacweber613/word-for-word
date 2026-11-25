@@ -19,8 +19,8 @@ android {
         applicationId = "com.isaacweber.wordforword"
         minSdk = 23
         targetSdk = 36
-        versionCode = 52
-        versionName = "0.9.15"
+        versionCode = 53
+        versionName = "0.9.16"
 
         ndk { abiFilters += "arm64-v8a" }
 
@@ -66,9 +66,6 @@ android {
             buildConfigField("boolean", "UPDATES", "false")
             // Free minutes through Word for Word's server (server/, FreeMinutes.kt).
             buildConfigField("String", "SERVICE_URL", "\"https://word-for-word.ynbsd6242.workers.dev\"")
-            // "Sign in with Google" (GoogleAccount.kt): the web client in Google Cloud project "Word for Word".
-            buildConfigField("String", "GOOGLE_WEB_CLIENT_ID",
-                "\"384040985984-vkab6b8rrj2el3dtkg4i8afsvoc7de9c.apps.googleusercontent.com\"")
         }
     }
 
@@ -122,10 +119,6 @@ dependencies {
     "playImplementation"("com.android.billingclient:billing:9.1.0")
     // Google Play Integrity, so the free-minutes server serves only the Play app (Integrity.kt). Play build only.
     "playImplementation"("com.google.android.play:integrity:1.6.0")
-    // "Sign in with Google", so hours given to a Google email reach that person's phones (GoogleAccount.kt). Play build only.
-    "playImplementation"("androidx.credentials:credentials:1.6.0")
-    "playImplementation"("androidx.credentials:credentials-play-services-auth:1.6.0")
-    "playImplementation"("com.google.android.libraries.identity.googleid:googleid:1.1.1")  // 1.2 needs Android 7; the app runs on 6
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
