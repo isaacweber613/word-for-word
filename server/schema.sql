@@ -60,9 +60,13 @@ CREATE TABLE IF NOT EXISTS grants (
   who TEXT NOT NULL,
   code TEXT NOT NULL UNIQUE,
   seconds REAL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- Set for hours given to one phone on the Failed checks page: they need no code, the phone's ID is
+  -- enough (its code is random and never shown). Added 2026-11-24: ALTER TABLE grants ADD COLUMN device TEXT.
+  device TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS grants_who ON grants (lower(who));
+CREATE UNIQUE INDEX IF NOT EXISTS grants_device ON grants (device);
 
 -- Plan seconds each grant used per month ("2026-11", UTC), across all its phones.
 CREATE TABLE IF NOT EXISTS grant_usage (
@@ -70,4 +74,20 @@ CREATE TABLE IF NOT EXISTS grant_usage (
   month TEXT NOT NULL,
   seconds REAL NOT NULL,
   PRIMARY KEY (grant_id, month)
+);
+
+-- Phones Google Play doesn't vouch for (Isaac, 2026-11-24: "a page where i can see phone's that fail the
+-- check and i can click a button to give them 30 minutes a month"). The app reports a failed check with
+-- POST /v1/register; yiddishvoicetotext.com, Admin, Failed checks lists them. reason is "google:<code>"
+-- (Play Integrity's error code on the phone), "timeout", "error:<what>" or "refused:<why>" (this server
+-- read Google's answer and it didn't vouch). A phone that passes later leaves the list unless it has hours.
+CREATE TABLE IF NOT EXISTS failed_checks (
+  device TEXT PRIMARY KEY,
+  model TEXT,
+  android TEXT,
+  app_version TEXT,
+  reason TEXT NOT NULL,
+  first_seen INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  count INTEGER NOT NULL
 );

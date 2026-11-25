@@ -18,14 +18,18 @@ export const DEFAULT_MODELS: Models = {
 export interface Sub { token: string; product: string; expiry: number }
 
 /**
- * Hours Isaac gave a person on his Access page, shared by every phone with its access code.
- * [seconds] is plan seconds a month, null for unlimited; [used] is this month's.
+ * Hours Isaac gave a person on his Access page, shared by every phone with its access code, or given to
+ * one phone on his Failed checks page ([device] set, no code needed). [seconds] is plan seconds a month,
+ * null for unlimited; [used] is this month's.
  */
-export interface Grant { id: number; who: string; seconds: number | null; used: number }
+export interface Grant { id: number; who: string; seconds: number | null; used: number; device: string | null }
+
+/** What the app says about a phone whose check failed (POST /v1/register). */
+export interface FailedCheck { model: string; android: string; app_version: string; reason: string }
 
 export interface Account {
   freeUsed: number;
-  /** The grant for the access code the call carried, or null (no code, or a removed one). */
+  /** The grant for the access code the call carried, else one given to this phone, or null. */
   grant: Grant | null;
   models: Models;
   /** The phone's latest subscription (maybe expired), with the plan seconds used this paid month. */
@@ -43,6 +47,10 @@ export interface Store {
   saveSubscription(device: string, sub: Sub): Promise<void>;
   /** Adds a bought top-up once. False when this purchase was already counted. */
   addTopup(token: string, device: string, seconds: number, now: number): Promise<boolean>;
+  /** Saves a failed check on the Failed checks list, counting each report. */
+  failedCheck(device: string, report: FailedCheck, now: number): Promise<void>;
+  /** The phone passed: it leaves the list, unless Isaac gave it hours. */
+  passedCheck(device: string): Promise<void>;
 }
 
 function parseModels(json: string | undefined, fallback: ModelChoice[]): ModelChoice[] {
@@ -66,8 +74,10 @@ export function d1Store(db: D1Database): Store {
           "LEFT JOIN subscription_usage u ON u.token = s.token AND u.period = s.expiry " +
           "WHERE d.device = ? ORDER BY s.expiry DESC LIMIT 1").bind(device),
         db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(device),
-        db.prepare("SELECT g.id, g.who, g.seconds, coalesce(u.seconds, 0) AS used FROM grants g " +
-          "LEFT JOIN grant_usage u ON u.grant_id = g.id AND u.month = ? WHERE g.code = ?").bind(month, code ?? ""),
+        // The code's grant first, else the phone's own.
+        db.prepare("SELECT g.id, g.who, g.seconds, g.device, coalesce(u.seconds, 0) AS used FROM grants g " +
+          "LEFT JOIN grant_usage u ON u.grant_id = g.id AND u.month = ? WHERE g.code = ? OR g.device = ? " +
+          "ORDER BY g.device IS NULL DESC LIMIT 1").bind(month, code ?? "", device),
       ]);
       const tiers = Object.fromEntries((models.results as { tier: string; models: string }[]).map((r) => [r.tier, r.models]));
       return {
@@ -106,6 +116,16 @@ export function d1Store(db: D1Database): Store {
       await db.prepare("INSERT INTO credit (device, seconds) VALUES (?, ?) " +
         "ON CONFLICT (device) DO UPDATE SET seconds = seconds + excluded.seconds").bind(device, seconds).run();
       return true;
+    },
+    async failedCheck(device, r, now) {
+      await db.prepare("INSERT INTO failed_checks (device, model, android, app_version, reason, first_seen, last_seen, count) " +
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 1) ON CONFLICT (device) DO UPDATE SET model = excluded.model, android = excluded.android, " +
+        "app_version = excluded.app_version, reason = excluded.reason, last_seen = excluded.last_seen, count = count + 1")
+        .bind(device, r.model, r.android, r.app_version, r.reason, now, now).run();
+    },
+    async passedCheck(device) {
+      await db.prepare("DELETE FROM failed_checks WHERE device = ? AND NOT EXISTS (SELECT 1 FROM grants WHERE device = ?)")
+        .bind(device, device).run();
     },
   };
 }

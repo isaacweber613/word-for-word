@@ -19,8 +19,8 @@ android {
         applicationId = "com.isaacweber.wordforword"
         minSdk = 23
         targetSdk = 36
-        versionCode = 53
-        versionName = "0.9.16"
+        versionCode = 54
+        versionName = "0.9.17"
 
         ndk { abiFilters += "arm64-v8a" }
 
@@ -64,8 +64,10 @@ android {
             dimension = "updates"
             buildConfigField("String", "APK_NAME", "\"\"")
             buildConfigField("boolean", "UPDATES", "false")
-            // Free minutes through Word for Word's server (server/, FreeMinutes.kt).
-            buildConfigField("String", "SERVICE_URL", "\"https://word-for-word.ynbsd6242.workers.dev\"")
+            // Free minutes through Word for Word's server (server/, FreeMinutes.kt). -PserviceUrl=... points a
+            // test build at a preview copy of the server (wrangler versions upload); releases never set it.
+            val serviceUrl = (project.findProperty("serviceUrl") as String?) ?: "https://word-for-word.ynbsd6242.workers.dev"
+            buildConfigField("String", "SERVICE_URL", "\"$serviceUrl\"")
         }
     }
 

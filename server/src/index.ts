@@ -24,8 +24,11 @@
  * rooted phones still work. While REQUIRE_INTEGRITY isn't "true", calls without a token still work.
  *
  * Endpoints (all with header X-Device-Id):
- *   POST /v1/register        {"integrity_token"}: a Play Integrity token whose request hash is the
- *                            device ID. Answers {"device_token"}, or 403 code device_unverified.
+ *   POST /v1/register        {"integrity_token", "model", "android", "app_version"}: a Play Integrity
+ *                            token whose request hash is the device ID. Answers {"device_token"}, or 403
+ *                            code device_unverified. Without a token, {"integrity_error"} says why the
+ *                            phone got none (answer: 400 no_play_token). Both failures go on the
+ *                            Failed checks list (table failed_checks).
  *   POST /v1/transcriptions  same JSON body as OpenRouter's /api/v1/audio/transcriptions. The
  *                            body's model is ignored. Answers like OpenRouter, with X-Model.
  *   GET  /v1/usage           {"used_seconds", "free_seconds", "month", "subscribed", "out"}
@@ -39,6 +42,9 @@
  * (header X-Access-Code) uses those hours first, on every phone that has it. They reset each UTC month
  * like the free minutes. A call with a valid code doesn't need a device token, since GitHub builds can't
  * get one; the code is the proof.
+ * Isaac can also give hours to one phone whose check fails (Isaac, 2026-11-24: "a page where i can see
+ * phone's that fail the check and i can click a button to give them 30 minutes a month"), on
+ * yiddishvoicetotext.com, Admin, Failed checks: a grant with the phone's device ID, used like a code's.
  *   GET /.well-known/assetlinks.json   for nuchemweber.com (route in wrangler.jsonc), so Android opens
  *                            the access links (https://nuchemweber.com/wordforword/a/?c=...) in the app.
  *
@@ -174,6 +180,19 @@ function outOfTime(a: Account, now: number, free: number): Response {
   return error(402, "You've used your " + Math.round(free / 60) + " free minutes this month.", "free_minutes_used");
 }
 
+/** A short line of text from the app, for the Failed checks list. */
+function short(v: unknown): string {
+  return String(v ?? "").slice(0, 120);
+}
+
+/**
+ * Why the phone got no Play Integrity token, as the app said: Google's error code on the phone
+ * (StandardIntegrityErrorCode, a negative number) as "google:<code>", else the app's word ("timeout").
+ */
+export function failureReason(v: unknown): string {
+  return typeof v === "number" || /^-?\d+$/.test(String(v)) ? "google:" + Number(v) : String(v);
+}
+
 /** A device ID is the app's hashed Android ID: 64 hex characters. */
 function deviceOf(request: Request): string | null {
   const id = request.headers.get("X-Device-Id") ?? "";
@@ -248,9 +267,16 @@ export async function handle(request: Request, env: Env, store: Store, now = new
 
   if (url.pathname === "/v1/register" && request.method === "POST") {
     if (!device) return error(400, "Missing device ID.");
+    const body = await request.json().catch(() => ({})) as Record<string, unknown>;
+    const token = body.integrity_token;
+    // What the phone is, for the Failed checks list. Anyone can send this; it gives nothing by itself.
+    const failed = (reason: string) => store.failedCheck(device, { model: short(body.model), android: short(body.android),
+      app_version: short(body.app_version), reason: short(reason) }, now.getTime());
+    if (typeof token !== "string" || token.length === 0) {
+      if (body.integrity_error != null) await failed(failureReason(body.integrity_error));
+      return error(400, "Missing integrity token.", "no_play_token");
+    }
     if (!env.GOOGLE_SERVICE_ACCOUNT || !env.DEVICE_TOKEN_SECRET) return error(503, "Phones can't be checked right now.");
-    const { integrity_token: token } = await request.json().catch(() => ({})) as { integrity_token?: unknown };
-    if (typeof token !== "string" || token.length === 0) return error(400, "Missing integrity token.");
     let payload: IntegrityPayload | null;
     try {
       payload = await decodeIntegrity(env.GOOGLE_SERVICE_ACCOUNT, token, fetcher, now.getTime());
@@ -260,8 +286,10 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     const problem = integrityProblem(payload, device);
     if (problem) {
       console.warn("Play Integrity refused a phone:", problem);
+      await failed("refused:" + problem);
       return error(403, "Google Play couldn't confirm this phone. Free minutes work only in Word for Word from Google Play.", "device_unverified");
     }
+    await store.passedCheck(device);
     return Response.json({ device_token: await deviceToken(env.DEVICE_TOKEN_SECRET, device) });
   }
 
@@ -271,18 +299,24 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   // Loaded before the device check: a valid access code stands in for a device token.
   const account = device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)
     ? await store.account(device, month, code) : null;
-  if (device && account && !account.grant) {
+  // Without a device token, given hours (a code's or the phone's own) still work, but only they do.
+  let grantOnly = false;
+  if (device && account) {
     const refused = await unverified(request, env, device);
-    if (refused) return refused;
+    if (refused && !account.grant) return refused;
+    grantOnly = !!refused;
   }
+  const pickFor = (a: Account) => grantOnly ? (grantLeft(a.grant) ? { bucket: "grant" as Bucket, paid: true } : null)
+    : choose(a, now.getTime(), free);
 
   if (url.pathname === "/v1/usage" && request.method === "GET") {
     if (!device || !account) return error(400, "Missing device ID.");
     const a = account, g = a.grant;
     return Response.json({ used_seconds: a.freeUsed, free_seconds: free, month,
-      subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !choose(a, now.getTime(), free),
-      // The hours given to this code; null when the call had no code or the code was removed.
-      access: g ? { who: g.who, seconds: g.seconds, used_seconds: g.used } : null });
+      subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !pickFor(a),
+      // The hours given to this code; null when the call had no code or the code was removed (the app then
+      // forgets it), so hours given to the phone itself don't show here.
+      access: g && !g.device ? { who: g.who, seconds: g.seconds, used_seconds: g.used } : null });
   }
 
   if (url.pathname === "/v1/purchases" && request.method === "POST") {
@@ -303,7 +337,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     if (v.kind === "subscription") await store.saveSubscription(device, { token, product: v.product, expiry: v.expiry });
     else await store.addTopup(token, device, TOPUP_SECONDS, now.getTime());
     const a = await store.account(device, month, code);
-    return Response.json({ subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !choose(a, now.getTime(), free) });
+    return Response.json({ subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !pickFor(a) });
   }
 
   if (url.pathname !== "/v1/transcriptions" || request.method !== "POST") return error(404, "Not found.");
@@ -320,7 +354,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   const format = typeof body.input_audio?.format === "string" ? body.input_audio.format : "wav";
 
   const a = account ?? await store.account(device, month, code);
-  const pick = choose(a, now.getTime(), free);
+  const pick = pickFor(a);
   if (!pick) return outOfTime(a, now.getTime(), free);
 
   const send = (b: object) => fetcher(OPENROUTER_URL, {

@@ -206,6 +206,28 @@ person stops the code at the next call, and the app forgets it (`/v1/usage` answ
   2,718,858 bytes (0.9.14: 2,717,040). Checked on the emulator: `nuchemweber.com: verified`, and opening a
   link showed "Done. Your hours are ready to use." with Settings showing the code in use.
 
+## Phones that fail the check (Isaac, 2026-11-24, 0.9.17)
+
+"add a page where i can see phone's that fail the check and i can click a button to give them 30 minutes a
+month (or another amount if i want)". When Play Integrity gives the Play build no token, the app posts
+`/v1/register` without one, with Google's error code (`integrity_error`, StandardIntegrityErrorCode such as -12,
+or "timeout"), the phone model, Android version and app version. When the server refuses a token, it records
+why itself. Both land in D1 `failed_checks` (one row per device ID, first and last seen, count); a phone that
+passes later leaves it unless it has hours. The app asks Google at most once per app start (one OnePlus 8 Pro
+had asked 254 times), and PostHog `device_check` carries `google_error`.
+
+- yiddishvoicetotext.com, Admin, Failed checks lists them with what Google said in plain words; Give (0.5 hours
+  a month unless changed, empty for unlimited) adds a `grants` row with `device` set and a random code that's
+  never shown. The phone uses it with no link, counted like other given hours (Yiddish twice).
+- Without a valid device token (once REQUIRE_INTEGRITY is on), given hours, a code's or the phone's own, still
+  work, but only they do: used up means 402 `given_hours_used`, never the free minutes. This also closed a hole
+  where a used-up code fell through to free minutes without the check.
+- `-PserviceUrl=...` builds the Play flavor against another server (a preview made with `npx wrangler versions
+  upload --var REQUIRE_INTEGRITY:true --preview-alias strictcheck` in server/, which shares the live D1).
+  Releases never set it.
+- The daily task that turns the block on (T3 Code "Turn on Play Integrity enforcement when ready") reads this
+  table too, and a failing phone Isaac gave hours to no longer holds the block back.
+
 ## Testing the keyboard shortcut on an emulator
 
 `adb shell input keyevent` and `input keycombination` never reach accessibility services, so

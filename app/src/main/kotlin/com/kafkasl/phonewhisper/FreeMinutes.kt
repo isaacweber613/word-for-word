@@ -51,7 +51,10 @@ object FreeMinutes {
         Access.code(context)?.let { header("X-Access-Code", it) }
     }
 
-    /** True once the server said Google Play doesn't vouch for this phone, until the app restarts. */
+    /**
+     * True once this phone's check failed (Google Play gave no token, or the server refused it), until the
+     * app restarts: it asks again only at the next start (Isaac, 2026-11-24; one phone asked 254 times).
+     */
     @Volatile private var refused = false
     private val registering = Any()
 
@@ -79,10 +82,21 @@ object FreeMinutes {
             val id = deviceId(context)
             android.util.Log.i("PhoneWhisper", "No device token yet: asking Google Play to vouch for this phone")
             val integrity = Integrity.token(context, id)
-            if (integrity == null) { Analytics.track("device_check", mapOf("result" to "no_play_token")); return null }
+            // What the phone is, so a failed check shows on Isaac's Failed checks page (server/schema.sql).
+            val body = JSONObject().put("model", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL)
+                .put("android", android.os.Build.VERSION.RELEASE).put("app_version", BuildConfig.VERSION_NAME)
+            if (integrity == null) {
+                refused = true
+                val why = Integrity.lastError ?: "unknown"
+                Analytics.track("device_check", mapOf("result" to "no_play_token", "google_error" to why))
+                body.put("integrity_error", why.toIntOrNull() ?: why)
+            } else body.put("integrity_token", integrity)
             val request = Request.Builder().url(BuildConfig.SERVICE_URL + "/v1/register").header("X-Device-Id", id)
-                .post(JSONObject().put("integrity_token", integrity).toString().toRequestBody("application/json".toMediaType()))
-                .build()
+                .post(body.toString().toRequestBody("application/json".toMediaType())).build()
+            if (integrity == null) {
+                try { http.newCall(request).execute().close() } catch (e: IOException) { }
+                return null
+            }
             return try {
                 http.newCall(request).execute().use { r ->
                     val body = r.body?.string() ?: ""

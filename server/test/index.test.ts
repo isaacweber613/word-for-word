@@ -3,7 +3,7 @@ import {
   accessCode, audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds,
   yiddishCharge, yiddishCheck, type Env,
 } from "../src/index";
-import { DEFAULT_MODELS, type Account, type Bucket, type Grant, type Models, type Store, type Sub } from "../src/store";
+import { DEFAULT_MODELS, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
 
 const device = "a".repeat(64);
 const env = { OPENROUTER_KEY: "test-key", FREE_SECONDS_PER_MONTH: "1800" } as Env;
@@ -12,15 +12,17 @@ const later = now.getTime() + 20 * 86400_000;
 
 /** The D1 store in memory. */
 function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | null; subUsed: number; credit: number;
-                                    grant: { code: string; who: string; seconds: number | null; used?: number } }> = {}) {
+                                    grant: { code: string; who: string; seconds: number | null; used?: number; device?: string } }> = {}) {
   const s = {
     free: init.free ?? 0, models: init.models ?? DEFAULT_MODELS, sub: init.sub ?? null,
     subUsed: init.subUsed ?? 0, credit: init.credit ?? 0, topups: new Set<string>(),
     grant: init.grant ? { used: 0, ...init.grant } : null,
+    failed: new Map<string, FailedCheck & { count: number }>(),
   };
   const store: Store = {
-    async account(_d, _m, code): Promise<Account> {
-      const g: Grant | null = s.grant && code === s.grant.code ? { id: 1, who: s.grant.who, seconds: s.grant.seconds, used: s.grant.used } : null;
+    async account(d, _m, code): Promise<Account> {
+      const g: Grant | null = s.grant && (code === s.grant.code || d === s.grant.device)
+        ? { id: 1, who: s.grant.who, seconds: s.grant.seconds, used: s.grant.used, device: s.grant.device ?? null } : null;
       return { freeUsed: s.free, grant: g, models: s.models, sub: s.sub ? { ...s.sub, used: s.subUsed } : null, credit: s.credit };
     },
     async charge(_d, _m, bucket: Bucket, seconds) {
@@ -34,6 +36,8 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
       if (s.topups.has(token)) return false;
       s.topups.add(token); s.credit += seconds; return true;
     },
+    async failedCheck(d, r) { s.failed.set(d, { ...r, count: (s.failed.get(d)?.count ?? 0) + 1 }); },
+    async passedCheck(d) { if (s.grant?.device !== d) s.failed.delete(d); },
   };
   return { s, store };
 }
@@ -356,9 +360,9 @@ describe("transcription server", () => {
     const google = (payload: unknown, status = 200) => (async (u: string) => u.includes("oauth2")
       ? Response.json({ access_token: "a", expires_in: 3600 })
       : Response.json(status === 200 ? { tokenPayloadExternal: payload } : { error: {} }, { status })) as unknown as typeof fetch;
-    const register = () => new Request("https://example.com/v1/register", {
-      method: "POST", headers: { "X-Device-Id": device }, body: JSON.stringify({ integrity_token: "itok" }),
-    });
+    const phone = { model: "OnePlus IN2023", android: "13", app_version: "0.9.17" };
+    const register = (body: Record<string, unknown> = { integrity_token: "itok", ...phone }) =>
+      new Request("https://example.com/v1/register", { method: "POST", headers: { "X-Device-Id": device }, body: JSON.stringify(body) });
 
     it("accepts the Play app on a phone with basic integrity, and not less", () => {
       expect(integrityProblem(good, device)).toBeNull();
@@ -387,6 +391,45 @@ describe("transcription server", () => {
       expect((await handle(register(), e, memoryStore().store, now, google(null, 400))).status).toBe(403);
       // Google refusing this server is not the phone's fault: try again later.
       expect((await handle(register(), e, memoryStore().store, now, google(null, 403))).status).toBe(503);
+    });
+
+    it("lists a phone that got no token from Google, or that Google didn't vouch for, and drops it once it passes", async () => {
+      const m = memoryStore();
+      const none = await handle(register({ integrity_error: -12, ...phone }), strict, m.store, now, ok);
+      expect(none.status).toBe(400);
+      await handle(register({ integrity_error: "timeout", ...phone }), strict, m.store, now, ok);
+      expect(m.s.failed.get(device)).toEqual({ ...phone, reason: "timeout", count: 2 });
+      expect((await handle(register({ integrity_error: -12, ...phone }), strict, m.store, now, ok)).status).toBe(400);
+      expect(m.s.failed.get(device)!.reason).toBe("google:-12");
+      const sa = await serviceAccount();
+      const e = { ...strict, GOOGLE_SERVICE_ACCOUNT: sa };
+      await handle(register(), e, m.store, now, google({ ...good, deviceIntegrity: {} }));
+      expect(m.s.failed.get(device)).toMatchObject({ reason: "refused:device none", count: 4 });
+      expect((await handle(register(), e, m.store, now, google(good))).status).toBe(200);
+      expect(m.s.failed.has(device)).toBe(false);
+      // A register call with neither a token nor a reason lists nothing.
+      await handle(register({}), strict, m.store, now, ok);
+      expect(m.s.failed.size).toBe(0);
+    });
+
+    it("serves a phone given hours without a device token, only from those hours, Yiddish twice", async () => {
+      const m = memoryStore({ free: 0, grant: { code: "XXXXXXXXXXXX", who: "Phone", seconds: 1800, device } });
+      expect((await handle(transcribe(10), strict, m.store, now, ok)).status).toBe(200);
+      expect(m.s.grant!.used).toBeCloseTo(10, 5);
+      expect(m.s.free).toBe(0);
+      const usage = await handle(new Request("https://example.com/v1/usage", { headers: { "X-Device-Id": device } }), strict, m.store, now, ok);
+      expect(await usage.json()).toMatchObject({ out: false, access: null });
+      expect(await yiddishCheck(strict, m.store, device, null, now)).toEqual({ ok: true });
+      await yiddishCharge(strict, m.store, device, 30, now);
+      expect(m.s.grant!.used).toBeCloseTo(70, 5);
+      // Another phone gets nothing from it.
+      expect((await handle(transcribe(5, {}, { "X-Device-Id": "b".repeat(64) }), strict, m.store, now, ok)).status).toBe(426);
+      // Used up: the free minutes don't take over without Google Play's word.
+      m.s.grant!.used = 1800;
+      const out = await handle(transcribe(5), strict, m.store, now, ok);
+      expect(out.status).toBe(402);
+      expect((await out.json() as { error: { code: string } }).error.code).toBe("given_hours_used");
+      expect(m.s.free).toBe(0);
     });
 
     it("refuses calls without a valid device token once required", async () => {
