@@ -79,6 +79,28 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     /** Volatile: the recording thread reads it to know when to stop. */
     @Volatile private var state = State.IDLE
+    /**
+     * The text box that had the cursor when this dictation started (or when a kept recording was sent
+     * again), so its words go there even if the cursor moved while they were on their way. Null when no
+     * box had the cursor; the words then go wherever one can take them, as before.
+     */
+    private var dictationTarget: AccessibilityNodeInfo? = null
+
+    /** A copy of the text box with the cursor now, or null. */
+    private fun focusedInput(): AccessibilityNodeInfo? = try {
+        val root = rootInActiveWindow
+        val node = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+        root?.recycle()
+        node?.takeIf { it.isEditable || it.className?.toString()?.contains("EditText") == true }
+            ?: run { node?.recycle(); null }
+    } catch (e: Exception) {
+        null
+    }
+
+    private fun setDictationTarget(node: AccessibilityNodeInfo?) {
+        dictationTarget?.recycle()
+        dictationTarget = node
+    }
     /** The recording that failed to transcribe, kept so a tap can send it again. */
     private var failedPcm: ByteArray? = null
     /** The History entry a failed recording was saved to (its audio, entry time), so a later try updates it. */
@@ -780,6 +802,8 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun retry() {
         val pcm = failedPcm ?: run { reset("Nothing to retry."); return }
         failedPcm = null
+        // A retry types where the cursor is now, since the person chose where to send it again.
+        setDictationTarget(focusedInput())
         state = State.TRANSCRIBING
         setAppearance(COLOR_BUSY)
         setBusy(true)
@@ -870,6 +894,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             toast("Couldn't start the microphone. Another app may be using it.")
             return
         }
+        setDictationTarget(focusedInput())
         val rec = audioRecord!!
         val out = ByteArrayOutputStream()
         pcmStream = out
@@ -1094,6 +1119,27 @@ class WhisperAccessibilityService : AccessibilityService() {
      * fall back to copying to the clipboard and pasting, and it says so on screen.
      */
     private fun injectText(text: String) {
+        // The box the dictation started in. The words arrive a moment after the stop, and by then the
+        // cursor may be in another box; they go only to this one, or stay on the clipboard and in History.
+        dictationTarget?.let { target ->
+            dictationTarget = null
+            val alive = try { target.refresh() } catch (_: Exception) { false }
+            val typed = alive && (trySetText(target, text) || run {
+                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                    .setPrimaryClip(ClipData.newPlainText("Word for Word", text))
+                tryPaste(target)
+            })
+            target.recycle()
+            if (typed) { Analytics.track("text_inserted", mapOf("method" to "typed")); return }
+            (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
+                .setPrimaryClip(ClipData.newPlainText("Word for Word", text))
+            Analytics.track("text_inserted", mapOf("method" to "target_gone"))
+            showFeedback("The box you dictated into is gone. Copied to clipboard and saved to history", 3000)
+            showingPasteFailure = true
+            handler.removeCallbacks(endPasteFailure)
+            handler.postDelayed(endPasteFailure, 3000)
+            return
+        }
         val candidates = findInjectionCandidates()
         Log.i(TAG, "Injecting text into ${candidates.size} candidate node(s)")
 
