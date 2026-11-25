@@ -57,6 +57,38 @@ describe("a local run of the server", () => {
       expect(statuses).toEqual([200, 402, 402, 402, 402]);
     });
 
+    it("can't send many recordings at once on a subscription's last second, or on the last second of bought hours", async () => {
+      const now = Date.now();
+      for (const [n, subUsed, credit] of [[40, 35_999, 0], [41, 36_000, 1]] as const) {
+        await server.reset();
+        const d = deviceId(n);
+        await server.db.batch([
+          server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, 1800)").bind(d, month()),
+          server.db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES ('s', 'monthly', ?, 'ACTIVE', ?, ?)")
+            .bind(now + 20 * DAY, now, now + 20 * DAY),
+          server.db.prepare("INSERT INTO subscription_devices (device, token) VALUES (?, 's')").bind(d),
+          server.db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES ('s', ?, ?)").bind(now + 20 * DAY, subUsed),
+          server.db.prepare("INSERT INTO credit (device, seconds) VALUES (?, ?)").bind(d, credit),
+        ]);
+        const release = holdOpenRouter(60);
+        const statuses = await burst(Array.from({ length: 5 }, () => () =>
+          server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body: recording(60) })), release);
+        expect(statuses).toEqual([200, 402, 402, 402, 402]);
+        expect(openrouterCalls()).toHaveLength(1);
+      }
+      // Bought hours end at zero, never below, once the one recording is settled.
+      expect(await server.eventually(async () => (await server.db.prepare("SELECT seconds FROM credit").first<{ seconds: number }>())!.seconds,
+        (s) => s === 0)).toBe(0);
+    });
+
+    it("never refuses unlimited given hours", async () => {
+      await server.db.prepare("INSERT INTO grants (id, who, code, seconds, created_at) VALUES (1, 'Me', 'K7QM4XPA9TRW', NULL, 0)").run();
+      await server.db.prepare("INSERT INTO grant_usage (grant_id, month, seconds) VALUES (1, ?, 1e9)").bind(month()).run();
+      const res = await server.fetch("/v1/transcriptions", { method: "POST",
+        headers: phone(deviceId(42), { token: false, code: "K7QM4XPA9TRW" }), body: recording(5) });
+      expect(res.status).toBe(200);
+    });
+
     // Not fixed by this server alone: the yiddishtry Worker (yiddish-stt tryout/worker) asks check once before a take
     // and calls charge after it, and has no way to hold time and give it back. This test fails, as it.fails expects,
     // until that Worker holds and settles each take the way recordings now do.

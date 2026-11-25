@@ -608,7 +608,10 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   // given back. Saved after the answer goes back.
   const typed = status >= 200 && status < 300 && used;
   const charged = typed ? planSeconds(text, audio, format, used!, pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR) : 0;
-  if (charged !== estimate) await later(store.charge(device, month, pick.bucket, charged - estimate, a.sub, a.grant));
+  // Bought hours held below zero end at zero (charge's floor) even when the estimate was exact.
+  if (charged !== estimate || pick.bucket === "credit") {
+    await later(store.charge(device, month, pick.bucket, charged - estimate, a.sub, a.grant));
+  }
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
 }
 
