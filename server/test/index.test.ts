@@ -3,7 +3,7 @@ import {
   accessCode, audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds,
   yiddishCharge, yiddishCheck, type Env,
 } from "../src/index";
-import { DEFAULT_MODELS, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
+import { DEFAULT_MODELS, usagePeriod, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
 
 const device = "a".repeat(64);
 const env = { OPENROUTER_KEY: "test-key", FREE_SECONDS_PER_MONTH: "1800" } as Env;
@@ -17,21 +17,24 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
     free: init.free ?? 0, models: init.models ?? DEFAULT_MODELS, sub: init.sub ?? null,
     subUsed: init.subUsed ?? 0, credit: init.credit ?? 0, topups: new Set<string>(),
     grant: init.grant ? { used: 0, ...init.grant } : null,
+    // Plan seconds per paid month (subscription_usage), keyed like the D1 store.
+    usage: new Map<number, number>(init.sub ? [[init.sub.period ?? init.sub.expiry, init.subUsed ?? 0]] : []),
     failed: new Map<string, FailedCheck & { count: number }>(),
   };
   const store: Store = {
     async account(d, _m, code): Promise<Account> {
       const g: Grant | null = s.grant && (code === s.grant.code || d === s.grant.device)
         ? { id: 1, who: s.grant.who, seconds: s.grant.seconds, used: s.grant.used, device: s.grant.device ?? null } : null;
-      return { freeUsed: s.free, grant: g, models: s.models, sub: s.sub ? { ...s.sub, used: s.subUsed } : null, credit: s.credit };
+      return { freeUsed: s.free, grant: g, models: s.models, sub: s.sub ? { ...s.sub, used: s.usage.get(s.sub.period ?? s.sub.expiry) ?? 0 } : null, credit: s.credit };
     },
-    async charge(_d, _m, bucket: Bucket, seconds) {
+    async charge(_d, _m, bucket: Bucket, seconds, sub) {
+      if (bucket === "sub" && sub) s.usage.set(sub.period ?? sub.expiry, (s.usage.get(sub.period ?? sub.expiry) ?? 0) + seconds);
       if (bucket === "grant") s.grant!.used += seconds;
       else if (bucket === "free") s.free += seconds;
       else if (bucket === "sub") s.subUsed += seconds;
       else s.credit = Math.max(0, s.credit - seconds);
     },
-    async saveSubscription(_d, sub) { s.sub = sub; },
+    async saveSubscription(_d, sub) { s.sub = { ...sub, period: usagePeriod(s.sub?.token === sub.token ? s.sub : null, sub) }; },
     async addTopup(token, _d, seconds) {
       if (s.topups.has(token)) return false;
       s.topups.add(token); s.credit += seconds; return true;
@@ -261,7 +264,7 @@ describe("transcription server", () => {
       method: "POST", headers: { "X-Device-Id": device }, body: JSON.stringify({ product_id: "monthly", purchase_token: "sub" }),
     }), { ...env, GOOGLE_SERVICE_ACCOUNT: sa }, store, now, google);
     expect(await res.json()).toEqual({ subscribed: true, out: false });
-    expect(s.sub).toEqual({ token: "sub", product: "monthly", expiry: later, state: "ACTIVE", checked: now.getTime() });
+    expect(s.sub).toEqual({ token: "sub", product: "monthly", expiry: later, state: "ACTIVE", checked: now.getTime(), period: later });
   });
 
   describe("a subscription that lapsed in the database", () => {
@@ -300,6 +303,35 @@ describe("transcription server", () => {
       const g = await googleSays("IN_GRACE_PERIOD", now.getTime() + 5 * 60_000);
       const { store } = memoryStore({ free: 1800, sub: lapsed });
       expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(200);
+    });
+
+    it("counts hours in a grace period against the unpaid month, and starts 10 fresh hours on a paid renewal", async () => {
+      const grace = await googleSays("IN_GRACE_PERIOD", now.getTime() + 5 * 60_000);
+      const { s, store } = memoryStore({ free: 1800, sub: lapsed, subUsed: SUB_SECONDS });
+      const res = await handle(transcribe(10), grace.e, store, now, grace.fetcher);
+      expect(res.status).toBe(402);
+      expect((await res.json()).error.code).toBe("hours_used");
+      expect(s.sub).toMatchObject({ state: "IN_GRACE_PERIOD", period: lapsed.expiry });
+      // Google moves the expiry again while still unpaid: still the same month.
+      const graceLater = await googleSays("IN_GRACE_PERIOD", now.getTime() + 20 * 60_000);
+      await handle(transcribe(10), graceLater.e, store, new Date(now.getTime() + 6 * 60_000), graceLater.fetcher);
+      expect(s.sub).toMatchObject({ period: lapsed.expiry });
+      // Paid: 10 fresh hours.
+      const paid = await googleSays("ACTIVE", later);
+      const after = new Date(now.getTime() + 21 * 60_000);
+      expect((await handle(transcribe(10), paid.e, store, after, paid.fetcher)).status).toBe(200);
+      expect(s.sub).toMatchObject({ state: "ACTIVE", period: later });
+      expect(s.usage.get(later)).toBeGreaterThan(0);
+    });
+
+    it("serves a day when Google says ACTIVE past its expiry, then asks again", async () => {
+      const g = await googleSays("ACTIVE", lapsed.expiry);
+      const { store } = memoryStore({ free: 1800, sub: lapsed });
+      expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(200);
+      expect((await handle(transcribe(10), g.e, store, new Date(now.getTime() + DAY - 1), g.fetcher)).status).toBe(200);
+      expect(g.asked).toHaveLength(1);
+      await handle(transcribe(10), g.e, store, new Date(now.getTime() + DAY), g.fetcher);
+      expect(g.asked).toHaveLength(2);
     });
 
     it("refuses on account hold, and asks again only a day later", async () => {

@@ -54,7 +54,7 @@
  */
 
 import { decodeIntegrity, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
-import { d1Store, type Account, type Bucket, type Grant, type ModelChoice, type Store, type Sub } from "./store";
+import { d1Store, usagePeriod, type Account, type Bucket, type Grant, type ModelChoice, type Store, type Sub } from "./store";
 
 export interface Env {
   DB: D1Database;
@@ -170,7 +170,9 @@ const MAY_RECOVER = ["ACTIVE", "IN_GRACE_PERIOD", "ON_HOLD", "PAUSED", "PENDING"
 export function subscribed(sub: Sub | null | undefined, now: number): boolean {
   if (!sub) return false;
   if (sub.expiry > now) return true;
-  return (sub.state === "ACTIVE" || sub.state === "IN_GRACE_PERIOD") && sub.checked != null && now - sub.checked < SILENT_GRACE_MS;
+  // Only when Google's own answer was already past its expiry; otherwise ask again once it passes.
+  return (sub.state === "ACTIVE" || sub.state === "IN_GRACE_PERIOD") && sub.checked != null &&
+    sub.checked >= sub.expiry && now - sub.checked < SILENT_GRACE_MS;
 }
 
 /**
@@ -203,8 +205,9 @@ export async function refreshed(a: Account, env: Env, store: Store, device: stri
     : { token: sub.token, product: sub.product, expiry: sub.expiry, state: "GONE", checked: now };
   console.log("Subscription re-checked with Google:", next.state, "until", new Date(next.expiry).toISOString());
   await store.saveSubscription(device, next);
-  // A new expiry is a new paid month, whose hours start unused.
-  return { ...a, sub: { ...next, used: next.expiry === sub.expiry ? sub.used : 0 } };
+  // A paid renewal is a new paid month, whose hours start unused; a grace period keeps the month before.
+  const period = usagePeriod(sub, next);
+  return { ...a, sub: { ...next, period, used: period === (sub.period ?? sub.expiry) ? sub.used : 0 } };
 }
 
 /**

@@ -18,9 +18,21 @@ export const DEFAULT_MODELS: Models = {
  * A Google Play subscription linked to the phone. [expiry] is the end of the paid month, in ms.
  * [state] is what Google said the last time this server asked (ACTIVE, IN_GRACE_PERIOD, ON_HOLD,
  * CANCELED, EXPIRED, ..., or GONE when Google no longer knows the token), [checked] when it asked
- * (ms). Both are null for rows saved before 2026-11-25.
+ * (ms). Both are null for rows saved before 2026-11-25. [period] is the paid month its hours count in
+ * (see usagePeriod); null means [expiry].
  */
-export interface Sub { token: string; product: string; expiry: number; state?: string | null; checked?: number | null }
+export interface Sub { token: string; product: string; expiry: number; state?: string | null; checked?: number | null;
+                       period?: number | null }
+
+/**
+ * The paid month [next] counts its hours in, after [prev] (the same subscription as stored, or null):
+ * its expiry, so each paid renewal starts 10 fresh hours, except in Google's grace period. There
+ * Google moves the expiry forward while the renewal is still unpaid, so the hours keep counting in
+ * the month before (Isaac, 2026-11-25). The d1Store's saveSubscription applies the same rule in SQL.
+ */
+export function usagePeriod(prev: Sub | null | undefined, next: Sub): number {
+  return next.state === "IN_GRACE_PERIOD" && prev ? prev.period ?? prev.expiry : next.expiry;
+}
 
 /**
  * Hours Isaac gave a person on his Access page, shared by every phone with its access code, or given to
@@ -74,9 +86,10 @@ export function d1Store(db: D1Database): Store {
         db.prepare("SELECT seconds FROM usage WHERE device = ? AND month = ?").bind(device, month),
         db.prepare("SELECT tier, models FROM models"),
         db.prepare(
-          "SELECT s.token, s.product, s.expiry, s.state, s.checked, coalesce(u.seconds, 0) AS used FROM subscription_devices d " +
+          "SELECT s.token, s.product, s.expiry, s.state, s.checked, coalesce(s.period, s.expiry) AS period, " +
+          "coalesce(u.seconds, 0) AS used FROM subscription_devices d " +
           "JOIN subscriptions s ON s.token = d.token " +
-          "LEFT JOIN subscription_usage u ON u.token = s.token AND u.period = s.expiry " +
+          "LEFT JOIN subscription_usage u ON u.token = s.token AND u.period = coalesce(s.period, s.expiry) " +
           "WHERE d.device = ? ORDER BY s.expiry DESC LIMIT 1").bind(device),
         db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(device),
         // The code's grant first, else the phone's own.
@@ -102,16 +115,19 @@ export function d1Store(db: D1Database): Store {
           "ON CONFLICT (device, month) DO UPDATE SET seconds = seconds + excluded.seconds").bind(device, month, seconds).run();
       } else if (bucket === "sub" && sub) {
         await db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES (?, ?, ?) " +
-          "ON CONFLICT (token, period) DO UPDATE SET seconds = seconds + excluded.seconds").bind(sub.token, sub.expiry, seconds).run();
+          "ON CONFLICT (token, period) DO UPDATE SET seconds = seconds + excluded.seconds").bind(sub.token, sub.period ?? sub.expiry, seconds).run();
       } else if (bucket === "credit") {
         await db.prepare("UPDATE credit SET seconds = max(0, seconds - ?) WHERE device = ?").bind(seconds, device).run();
       }
     },
     async saveSubscription(device, sub) {
       await db.batch([
-        db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked) VALUES (?, ?, ?, ?, ?) " +
+        // usagePeriod: a new row, or a paid renewal, counts in its expiry; a grace period keeps the stored month.
+        db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES (?, ?, ?, ?, ?, ?) " +
           "ON CONFLICT (token) DO UPDATE SET product = excluded.product, expiry = excluded.expiry, state = excluded.state, " +
-          "checked = excluded.checked").bind(sub.token, sub.product, sub.expiry, sub.state ?? null, sub.checked ?? null),
+          "checked = excluded.checked, period = CASE WHEN excluded.state = 'IN_GRACE_PERIOD' " +
+          "THEN coalesce(subscriptions.period, subscriptions.expiry) ELSE excluded.expiry END")
+          .bind(sub.token, sub.product, sub.expiry, sub.state ?? null, sub.checked ?? null, sub.expiry),
         db.prepare("INSERT OR IGNORE INTO subscription_devices (device, token) VALUES (?, ?)").bind(device, sub.token),
       ]);
     },

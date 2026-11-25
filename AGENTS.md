@@ -161,8 +161,11 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   `subscribed: false` without asking Google a second time. The `monthly` base plan has a 7-day grace
   period and a 53-day account hold (Play Console, checked 2026-11-25), yet Google skipped both for
   that test subscription, probably because test subscriptions end after 6 renewals (not confirmed).
-  Not fixed: hours used are kept per expiry, so a grace period that moves the expiry starts the
-  10 hours again.
+  Hours count per paid month (`subscriptions.period`, the key in `subscription_usage`): the expiry,
+  except that in a grace period Google moves the expiry while the renewal is unpaid, so the hours keep
+  counting in the month before; 10 fresh hours start only when Google says ACTIVE with a new expiry
+  (Isaac, 2026-11-25). The same day fixed: a grace answer kept the phone served for a whole day even
+  after Google's new expiry passed; the day now applies only when Google's answer was already past it.
 
 ## Paid plan (agreed with Isaac 2026-11-20, built the same day)
 

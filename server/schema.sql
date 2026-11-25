@@ -24,7 +24,11 @@ CREATE TABLE IF NOT EXISTS subscriptions (
   -- GONE for a token Google no longer knows) and when (ms). Added 2026-11-25:
   -- ALTER TABLE subscriptions ADD COLUMN state TEXT; ALTER TABLE subscriptions ADD COLUMN checked INTEGER.
   state TEXT,
-  checked INTEGER
+  checked INTEGER,
+  -- The paid month its hours count in (subscription_usage.period): the expiry, except that a grace period
+  -- keeps the month before, since Google moves the expiry while the renewal is unpaid. NULL means expiry.
+  -- Added 2026-11-25: ALTER TABLE subscriptions ADD COLUMN period INTEGER.
+  period INTEGER
 );
 
 -- Which phones a subscription is on (the same Google account on more than one phone shares it).
