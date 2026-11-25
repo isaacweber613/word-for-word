@@ -3,6 +3,7 @@
  * stand-ins for Google and OpenRouter. Review of 2026-11-25; each test failed before its fix.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { d1Store } from "../src/store";
 import { deviceId, phone, recording, startLocal, type LocalServer } from "./local-run";
 
 const month = () => new Date().toISOString().slice(0, 7);
@@ -63,6 +64,83 @@ describe("a local run of the server", () => {
       const used = await server.eventually(async () => (await server.db.prepare("SELECT seconds FROM usage WHERE device = ?")
         .bind(d).first<{ seconds: number }>())?.seconds ?? 0, (s) => s === 0);
       expect(used).toBe(0);
+    });
+  });
+
+  describe("money already paid", () => {
+    /** The local database, failing once on the first statement matching [pattern], as a lost connection would. */
+    function failingOnce(db: D1Database, pattern: RegExp): D1Database {
+      let failed = false;
+      const check = (sql: string) => {
+        if (!failed && pattern.test(sql)) { failed = true; throw new Error("D1_ERROR: Network connection lost."); }
+      };
+      type Wrapped = D1PreparedStatement & { sql: string; real: D1PreparedStatement };
+      const wrap = (real: D1PreparedStatement, sql: string): Wrapped => Object.assign(Object.create(real) as D1PreparedStatement, {
+        sql, real,
+        bind: (...v: unknown[]) => wrap(real.bind(...v), sql),
+        run: async () => { check(sql); return real.run(); },
+      }) as Wrapped;
+      return Object.assign(Object.create(db) as D1Database, {
+        prepare: (sql: string) => wrap(db.prepare(sql), sql),
+        batch: async (statements: Wrapped[]) => { statements.forEach((s) => check(s.sql)); return db.batch(statements.map((s) => s.real)); },
+      });
+    }
+
+    it("never counts a bought top-up without adding its hours, even when the database fails in between", async () => {
+      const d = deviceId(20);
+      const store = d1Store(failingOnce(server.db, /^INSERT INTO credit/));
+      await expect(store.addTopup("tok", d, 4 * 3600, Date.now())).rejects.toThrow("Network connection lost");
+      // The app sends the purchase again on its next start.
+      await store.addTopup("tok", d, 4 * 3600, Date.now());
+      const credit = await server.db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(d).first<{ seconds: number }>();
+      expect(credit?.seconds).toBe(4 * 3600);
+      // And once only.
+      expect(await store.addTopup("tok", d, 4 * 3600, Date.now())).toBe(false);
+      expect((await server.db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(d).first<{ seconds: number }>())!.seconds)
+        .toBe(4 * 3600);
+    });
+
+    /** A phone that has used this month's 10 subscription hours, with one 4-hour top-up bought [ago] ms ago. */
+    async function subscriberWithTopup(d: string, token: string, ago: number) {
+      const now = Date.now();
+      await server.db.batch([
+        server.db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES (?, 'monthly', ?, 'ACTIVE', ?, ?)")
+          .bind("sub-" + d, now + 20 * DAY, now, now + 20 * DAY),
+        server.db.prepare("INSERT INTO subscription_devices (device, token) VALUES (?, ?)").bind(d, "sub-" + d),
+        server.db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES (?, ?, 36000)").bind("sub-" + d, now + 20 * DAY),
+        server.db.prepare("INSERT INTO topups (token, device, seconds, created_at) VALUES (?, ?, 14400, ?)").bind(token, d, now - ago),
+        server.db.prepare("INSERT INTO credit (device, seconds) VALUES (?, 14400) ON CONFLICT (device) DO UPDATE SET seconds = seconds + 14400").bind(d),
+      ]);
+    }
+    const creditOf = (d: string) => server.db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(d).first<{ seconds: number }>()
+      .then((r) => r?.seconds ?? 0);
+
+    it("takes back a top-up refunded longer ago than Google's 30-day refund list goes", async () => {
+      const d = deviceId(21);
+      await subscriberWithTopup(d, "old-topup", 40 * DAY);
+      // Refunded 35 days ago: no longer on Google's list, but Google still knows the purchase as canceled.
+      server.stand.voided = () => Response.json({});
+      server.stand.product = (_p, token) => Response.json({ purchaseState: token === "old-topup" ? 1 : 0 });
+      expect((await server.fetch("/v1/usage", { headers: phone(d) })).status).toBe(200);
+      expect(await server.eventually(() => creditOf(d), (c) => c === 0)).toBe(0);
+    });
+
+    it("keeps an old top-up that wasn't refunded, and leaves another phone's old top-up to that phone's own check", async () => {
+      const a = deviceId(22), b = deviceId(23);
+      await subscriberWithTopup(a, "kept", 40 * DAY);
+      await subscriberWithTopup(b, "other", 40 * DAY);
+      server.stand.voided = () => Response.json({});
+      server.stand.product = () => Response.json({ purchaseState: 0 });
+      await server.fetch("/v1/usage", { headers: phone(a) });
+      const checked = (t: string) => server.db.prepare("SELECT checked FROM topups WHERE token = ?").bind(t).first<{ checked: number | null }>()
+        .then((r) => r?.checked ?? null);
+      expect(await server.eventually(() => checked("kept"), (c) => c != null)).not.toBeNull();
+      expect(await creditOf(a)).toBe(14400);
+      expect(await checked("other")).toBeNull();
+      const asked = () => server.calls.filter((c) => c.path.includes("/purchases/products/")).map((c) => decodeURIComponent(c.path).split("/").pop());
+      expect(asked()).toEqual(["kept"]);
+      await server.fetch("/v1/usage", { headers: phone(b) });
+      expect(await server.eventually(async () => asked(), (x) => x.length === 2)).toEqual(["kept", "other"]);
     });
   });
 

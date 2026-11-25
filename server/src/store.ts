@@ -77,11 +77,15 @@ export interface Store {
    * one never asked about counts from when it was bought), or null when it has none.
    */
   topupsChecked(device: string): Promise<number | null>;
+  /** The purchase tokens of [device]'s counted top-ups last checked (or bought, if never checked) before [before]. */
+  staleTopups(device: string, before: number): Promise<string[]>;
   /**
    * Takes back what is left of each voided top-up's hours from its phone, never below zero, once per
-   * top-up; every top-up still counted is then checked as of [now]. Answers how many were taken back.
+   * top-up. Then marks as checked at [now] the counted top-ups Google's refund list covered (last checked,
+   * or bought, since [since]) and all of [device]'s, which were asked about one by one. Answers how many
+   * were taken back.
    */
-  takeBackTopups(voided: string[], now: number): Promise<number>;
+  takeBackTopups(voided: string[], now: number, since: number, device: string): Promise<number>;
   /** Saves a failed check on the Failed checks list, counting each report. */
   failedCheck(device: string, report: FailedCheck, now: number): Promise<void>;
   /** The phone passed: it leaves the list, unless Isaac gave it hours. */
@@ -169,19 +173,27 @@ export function d1Store(db: D1Database): Store {
       ]);
     },
     async addTopup(token, device, seconds, now) {
-      const r = await db.prepare("INSERT OR IGNORE INTO topups (token, device, seconds, created_at) VALUES (?, ?, ?, ?)")
-        .bind(token, device, seconds, now).run();
-      if (!r.meta.changes) return false;
-      await db.prepare("INSERT INTO credit (device, seconds) VALUES (?, ?) " +
-        "ON CONFLICT (device) DO UPDATE SET seconds = seconds + excluded.seconds").bind(device, seconds).run();
-      return true;
+      // One transaction, the hours added only when this call counted the top-up (changes() is the insert's), so a
+      // failure between the two can't leave it counted without its hours (review, 2026-11-25: then every later
+      // send of the purchase was ignored as already counted, and the 4 hours bought were never added).
+      const [counted] = await db.batch([
+        db.prepare("INSERT OR IGNORE INTO topups (token, device, seconds, created_at) VALUES (?, ?, ?, ?)").bind(token, device, seconds, now),
+        db.prepare("INSERT INTO credit (device, seconds) SELECT ?, ? WHERE changes() = 1 " +
+          "ON CONFLICT (device) DO UPDATE SET seconds = seconds + excluded.seconds").bind(device, seconds),
+      ]);
+      return (counted.meta.changes ?? 0) > 0;
     },
     async topupsChecked(device) {
       const row = await db.prepare("SELECT min(coalesce(checked, created_at)) AS at FROM topups WHERE device = ? AND voided IS NULL")
         .bind(device).first<{ at: number | null }>();
       return row?.at ?? null;
     },
-    async takeBackTopups(voided, now) {
+    async staleTopups(device, before) {
+      const rows = await db.prepare("SELECT token FROM topups WHERE device = ? AND voided IS NULL AND coalesce(checked, created_at) < ?")
+        .bind(device, before).all<{ token: string }>();
+      return rows.results.map((r) => r.token);
+    },
+    async takeBackTopups(voided, now, since, device) {
       // One transaction: a top-up already taken back, or one this server never counted, changes nothing.
       const results = await db.batch([
         ...voided.flatMap((token) => [
@@ -189,7 +201,9 @@ export function d1Store(db: D1Database): Store {
             "WHERE device = (SELECT device FROM topups WHERE token = ? AND voided IS NULL)").bind(token, token),
           db.prepare("UPDATE topups SET voided = ? WHERE token = ? AND voided IS NULL").bind(now, token),
         ]),
-        db.prepare("UPDATE topups SET checked = ? WHERE voided IS NULL").bind(now),
+        // Another phone's top-up last checked before [since] stays unchecked until that phone asks about it itself.
+        db.prepare("UPDATE topups SET checked = ? WHERE voided IS NULL AND (coalesce(checked, created_at) >= ? OR device = ?)")
+          .bind(now, since, device),
       ]);
       return results.filter((_, i) => i % 2 === 1 && i < voided.length * 2).reduce((n, r) => n + (r.meta.changes ?? 0), 0);
     },

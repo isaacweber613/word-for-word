@@ -60,7 +60,8 @@
  * yiddishCharge below), which isn't on the internet.
  */
 
-import { decodeIntegrity, PACKAGE, verify, voidedPurchases, type IntegrityPayload, type Verified } from "./google";
+import { decodeIntegrity, PACKAGE, productState, verify, VOIDED_WINDOW_MS, voidedPurchases, type IntegrityPayload,
+  type Verified } from "./google";
 import { d1Store, usagePeriod, type Account, type Bucket, type Grant, type ModelChoice, type Store, type Sub } from "./store";
 
 export interface Env {
@@ -265,7 +266,9 @@ export async function refreshed(a: Account, env: Env, store: Store, device: stri
  * counted). Google lists such purchases in its Voided Purchases API for 30 days (voidedPurchases).
  * While [a] has bought hours left, it is asked at most once a day, after the answer went back, the same
  * as a paid subscription's refund check (recheckDue), so the call is no slower and a refund counts from
- * a later call. One answer covers every phone's top-ups.
+ * a later call. One answer covers the top-ups of every phone checked in the last 30 days. Google's list
+ * goes back only that far, so this phone's top-ups last checked before then are asked about one by one
+ * (review, 2026-11-25: a top-up refunded while no phone with bought hours called for 30 days kept them).
  */
 export async function takeBackRefunds(a: Account, env: Env, store: Store, device: string, now: number,
                                       fetcher: typeof fetch, defer?: (work: Promise<unknown>) => unknown): Promise<void> {
@@ -274,7 +277,12 @@ export async function takeBackRefunds(a: Account, env: Env, store: Store, device
   const work = (async () => {
     const checked = await store.topupsChecked(device);
     if (checked == null || now - checked < SILENT_GRACE_MS) return;
-    const taken = await store.takeBackTopups(await voidedPurchases(serviceAccount, fetcher, now), now);
+    const voided = await voidedPurchases(serviceAccount, fetcher, now);
+    const since = now - VOIDED_WINDOW_MS;
+    for (const token of await store.staleTopups(device, since)) {
+      if (await productState(serviceAccount, TOPUP, token, fetcher, now) === 1) voided.push(token);
+    }
+    const taken = await store.takeBackTopups(voided, now, since, device);
     if (taken) console.log("Refunded top-ups, hours left taken back:", taken);
   })().catch((e) => console.error("Top-up refund check failed:", e));
   if (defer) await defer(work); else await work;

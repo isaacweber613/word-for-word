@@ -65,7 +65,11 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
       const counted = [...s.topups.values()].filter((t) => t.voided == null);
       return counted.length ? Math.min(...counted.map((t) => t.checked ?? t.created)) : null;
     },
+    async staleTopups(_d, before) {
+      return [...s.topups].filter(([, t]) => t.voided == null && (t.checked ?? t.created) < before).map(([token]) => token);
+    },
     async takeBackTopups(voided, at) {
+      // Every top-up here is the one phone's, which the real store marks checked whatever Google's list covered.
       let taken = 0;
       for (const token of voided) {
         const t = s.topups.get(token);
