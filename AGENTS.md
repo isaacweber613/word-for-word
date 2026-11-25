@@ -158,7 +158,9 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   Real-time developer notifications were not used: they need a Pub/Sub topic, a push endpoint that
   checks Google's signed token and a Play Console setting, for the same result. Checked live on
   Isaac's test subscription: Google said EXPIRED (paid until 13:48 UTC), and the server answered
-  `subscribed: false` without asking Google a second time.
+  `subscribed: false` without asking Google a second time. The `monthly` base plan has a 7-day grace
+  period and a 53-day account hold (Play Console, checked 2026-11-25), yet Google skipped both for
+  that test subscription, probably because test subscriptions end after 6 renewals (not confirmed).
   Not fixed: hours used are kept per expiry, so a grace period that moves the expiry starts the
   10 hours again.
 
