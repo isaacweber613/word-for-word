@@ -50,9 +50,14 @@ object Billing {
             .enablePendingPurchases(PendingPurchasesParams.newBuilder().enableOneTimeProducts().build())
             .enableAutoServiceReconnection()
             .build().also { client = it }
+        // Play calls this again on every automatic reconnection try; [ready] must run only once,
+        // or a failed recording was reported again with each try (seen on an emulator 2026-11-25).
+        val answered = java.util.concurrent.atomic.AtomicBoolean(false)
         c.startConnection(object : BillingClientStateListener {
-            override fun onBillingSetupFinished(result: BillingResult) =
+            override fun onBillingSetupFinished(result: BillingResult) {
+                if (answered.getAndSet(true)) return
                 ready(if (result.responseCode == BillingClient.BillingResponseCode.OK) c else null)
+            }
             override fun onBillingServiceDisconnected() {}
         })
     }
