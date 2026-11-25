@@ -173,7 +173,9 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
 micromaxpro7@gmail.com). 0.9.10 (versionCode 47, the first build with billing) is on the internal
 testing track; closed testing still has 0.9.9. Both products are Active: subscription `monthly`
 (base plan `monthly`, auto-renewing) and one-time `extra_hours_4` (purchase option `buy`). Google's
-price rounding made them US$2.99 and US$0.99. The account is a non-trader and the app isn't offered
+price rounding made them US$2.99 and US$0.99; Isaac keeps those (2026-11-25: "Drop it!"), so don't
+ask about the cent again. The bank account for payouts was added 11-24 and waits
+on Google's test deposit (1 to 2 days) before Isaac can verify it; don't remind him. The account is a non-trader and the app isn't offered
 in the EEA or UK; keep it that way while it sells anything.
 
 Built: the server above, `Billing.kt` in the Play build (`src/play`; the GitHub builds get the
@@ -322,3 +324,28 @@ Share under it. Not kept: recordings too short to send, and ones the model answe
 ("only if it's a legit recording"). A later try that types it fills in the same entry. History's
 "Always save audio" switch (pref `always_save_audio`) keeps the audio of typed recordings too.
 Audio is deleted with its entry, after 24 hours unless "Keep history forever" is on.
+
+## Subscribe sheet when time runs out (Isaac, 2026-11-25, 0.9.18)
+
+Isaac, about the "You've used this month's free minutes. Subscribe in Word for Word..." message shown over
+the app he was in: "It doesn't push me hard enough and make it easy enough to subscribe. That pop-up should
+probably be a subscribe button." Now in the Play build, when a recording is refused for no time left
+(`FreeMinutes.OUT_FREE`, `OUT_HOURS`), a small sheet opens over the current app (`SubscribeSheet.kt`):
+one line saying what ran out, one button ("Subscribe, 10 hours a month for $3", or "Add 4 hours for $1"
+when subscribed) that opens Google Play's purchase screen right there, and "Not now". After a purchase it
+says "Ready. Press the mic to keep going." The kept recording stays on the retry button, so that press
+types it.
+
+- From dictation the service starts `SubscribeActivity` (see-through, its own task so the app's main
+  screen doesn't come up behind it, and the activity Play Billing needs to show its screen). Android
+  allows that only while one of the service's windows is on screen; the emulator log showed it allowed
+  as `BAL_ALLOW_NON_APP_VISIBLE_WINDOW` (the floating button). If the sheet hasn't opened 1.5 s later
+  (button hidden, such as a Yiddish shortcut press with the keyboard shortcut on), the old message shows.
+- A shared file (`ShareActivity`) shows the same sheet and carries on with the file after a purchase.
+- Unchanged: the GitHub builds (they sell nothing, so they keep the plain message) and hours given on
+  the Access page (`OUT_GIVEN`, nothing to buy).
+- The emulators on this PC have no Play Store (all `google_apis` images), so tests here reach the sheet and
+  the button's "Google Play isn't available" answer, not Google's purchase screen. The button calls the same
+  `Billing.subscribe` / `buyHours` as the Settings Subscribe row. To test the sheet without using up real
+  minutes, build with `-PserviceUrl=http://localhost:8787` against a local server that answers 402
+  `free_minutes_used`, with `adb reverse tcp:8787 tcp:8787` (debug builds allow plain HTTP to localhost).
