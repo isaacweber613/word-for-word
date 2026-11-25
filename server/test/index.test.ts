@@ -267,6 +267,26 @@ describe("transcription server", () => {
     expect(s.sub).toEqual({ token: "sub", product: "monthly", expiry: later, state: "ACTIVE", checked: now.getTime(), period: later });
   });
 
+  it("refuses a refunded or unpaid subscription even when its expiry is still ahead", async () => {
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const sa = JSON.stringify({ client_email: "x@y", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) });
+    for (const state of ["EXPIRED", "PENDING", "PENDING_PURCHASE_CANCELED"]) {
+      const google = (async (u: string) => u.includes("oauth2")
+        ? Response.json({ access_token: "a", expires_in: 3600 })
+        : Response.json({ subscriptionState: "SUBSCRIPTION_STATE_" + state,
+            lineItems: [{ productId: "monthly", expiryTime: new Date(later).toISOString() }] })) as unknown as typeof fetch;
+      const { s, store } = memoryStore({ free: 1800 });
+      const res = await handle(new Request("https://example.com/v1/purchases", {
+        method: "POST", headers: { "X-Device-Id": device }, body: JSON.stringify({ product_id: "monthly", purchase_token: "sub" }),
+      }), { ...env, GOOGLE_SERVICE_ACCOUNT: sa }, store, now, google);
+      expect(res.status).toBe(402);
+      expect(s.sub).toBeNull();
+    }
+    expect(choose({ freeUsed: 1800, grant: null, models: DEFAULT_MODELS, credit: 0,
+      sub: { token: "t", product: "monthly", expiry: later, state: "EXPIRED", checked: now.getTime(), used: 0 } }, now.getTime(), 1800)).toBeNull();
+  });
+
   describe("a subscription that lapsed in the database", () => {
     const lapsed = { token: "sub", product: "monthly", expiry: now.getTime() - 60_000 };
     const DAY = 24 * 3600_000;

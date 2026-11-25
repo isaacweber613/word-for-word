@@ -162,6 +162,9 @@ export const SILENT_GRACE_MS = 24 * 3600_000;
 /** States Google can still turn back into a paid subscription without a new purchase. */
 const MAY_RECOVER = ["ACTIVE", "IN_GRACE_PERIOD", "ON_HOLD", "PAUSED", "PENDING"];
 
+/** States where Google gives no access, whatever the expiry says. */
+const NOT_PAID = ["EXPIRED", "PENDING", "PENDING_PURCHASE_CANCELED"];
+
 /**
  * Whether [sub] pays now: before its expiry, which Google moves forward on each renewal and during
  * the grace period. Also when Google last said ACTIVE or IN_GRACE_PERIOD but its expiry was already
@@ -169,6 +172,10 @@ const MAY_RECOVER = ["ACTIVE", "IN_GRACE_PERIOD", "ON_HOLD", "PAUSED", "PENDING"
  */
 export function subscribed(sub: Sub | null | undefined, now: number): boolean {
   if (!sub) return false;
+  // Never paid, or taken back: a revoked or charged-back subscription is EXPIRED but can keep its
+  // future expiry, and Google says to end access at once (developer.android.com/google/play/billing/
+  // lifecycle/subscriptions, Revocations). Pending sign-ups haven't been paid yet.
+  if (NOT_PAID.includes(sub.state ?? "")) return false;
   if (sub.expiry > now) return true;
   // Only when Google's own answer was already past its expiry; otherwise ask again once it passes.
   return (sub.state === "ACTIVE" || sub.state === "IN_GRACE_PERIOD") && sub.checked != null &&
