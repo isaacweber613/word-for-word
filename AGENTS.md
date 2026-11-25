@@ -117,7 +117,9 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   0.9.9), together with the Data safety change (device IDs also for fraud prevention); enforcement
   is still off. A preview Worker version with it on (`npx wrangler versions upload --var
   REQUIRE_INTEGRITY:true --preview-alias integritytest`) refused made-up IDs from a computer: 426
-  without a token, 403 with a made-up one.
+  without a token, 403 with a made-up one. 2026-11-25: enforcement is on in the live Worker. Six real
+  phones passed (PostHog `device_check` ok); the only failing one, a OnePlus 8 Pro (Google error -9),
+  was given 30 minutes a month on the Failed checks page, as Isaac had asked on 11-24.
 - Free minutes per month: `FREE_SECONDS_PER_MONTH` in `server/wrangler.jsonc`.
 - Since 0.9.7 (Isaac, 2026-11-19: "It should be as fast as possible") cloud recordings upload as
   Ogg Opus, about 12 times smaller than WAV (`OggOpus.kt`, Android 10+). The app writes the Ogg

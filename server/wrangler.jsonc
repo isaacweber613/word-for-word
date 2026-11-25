@@ -9,9 +9,10 @@
   "vars": {
     // 30 free minutes per phone per month (Isaac, 2026-11-06).
     "FREE_SECONDS_PER_MONTH": "1800",
-    // "true": every call needs a device token from Play Integrity (POST /v1/register). Turned on
-    // only once the first build that registers (0.9.11) is on every testing track.
-    "REQUIRE_INTEGRITY": "false"
+    // "true": every call needs a device token from Play Integrity (POST /v1/register), or hours given on
+    // the Access or Failed checks page. Turned on 2026-11-25: every testing track has 0.9.11 or later,
+    // and the one phone that fails (a OnePlus 8 Pro) got 30 minutes a month on the Failed checks page.
+    "REQUIRE_INTEGRITY": "true"
   },
   // The app's address stays word-for-word.ynbsd6242.workers.dev. The route only answers the access links'
   // assetlinks.json; the rest of nuchemweber.com is untouched (the app's page is the word-for-word-site Worker).
