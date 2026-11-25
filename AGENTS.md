@@ -351,3 +351,11 @@ types it.
   `Billing.subscribe` / `buyHours` as the Settings Subscribe row. To test the sheet without using up real
   minutes, build with `-PserviceUrl=http://localhost:8787` against a local server that answers 402
   `free_minutes_used`, with `adb reverse tcp:8787 tcp:8787` (debug builds allow plain HTTP to localhost).
+- Found while testing: Play's billing connection calls `onBillingSetupFinished` again on every automatic
+  reconnection try, which re-ran the last purchase check and reported the refused recording again each time
+  (three extra sheets). `Billing.client` now answers its caller once per connection.
+- Shipped 2026-11-25: app 126b664 + d714b3b as 0.9.18 (versionCode 55) on GitHub, Play internal testing
+  ("Available to internal testers"), and closed testing sent for review. Play APK 2,722,246 bytes (0.9.17:
+  2,719,223, +0.11%). Speed test: 16.2 ms from the stop to the upload starting. Checked on the emulator in
+  Messages: the sheet opened over it (`.dev/shots/subscribe-sheet-0.9.18.png`, not committed); the two
+  follow-up fixes in d714b3b were not re-checked on screen because another agent's session held the emulator.
