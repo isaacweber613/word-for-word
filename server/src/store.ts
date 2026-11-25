@@ -60,6 +60,14 @@ export type Bucket = "grant" | "free" | "sub" | "credit";
 export interface Store {
   /** [code] is the access code the call carried (normalized, see accessCode), or null. */
   account(device: string, month: string, code?: string | null): Promise<Account>;
+  /**
+   * Holds [seconds] on [bucket] for a recording about to be sent, only while what it used is still under
+   * [limit] (null: no limit; bought hours: while any are left), in one statement, so calls at the same
+   * moment can't all pass on the same last second. False when nothing is left. charge then settles it.
+   */
+  reserve(device: string, month: string, bucket: Bucket, seconds: number, limit: number | null, sub: Sub | null,
+          grant?: Grant | null): Promise<boolean>;
+  /** Adds [seconds] to what [bucket] used; a negative amount gives back part of what reserve held. */
   charge(device: string, month: string, bucket: Bucket, seconds: number, sub: Sub | null, grant?: Grant | null): Promise<void>;
   saveSubscription(device: string, sub: Sub): Promise<void>;
   /** Adds a bought top-up once. False when this purchase was already counted. */
@@ -89,6 +97,15 @@ function parseModels(json: string | undefined, fallback: ModelChoice[]): ModelCh
 }
 
 export function d1Store(db: D1Database): Store {
+  /**
+   * Adds [seconds] to the counter row of [table] keyed by [keys]; a negative amount (giving back what reserve
+   * held) only changes a row that is there. [table] and [keys] are this file's own names, never input.
+   */
+  const add = (table: string, keys: [string, string], values: [string | number, string | number], seconds: number) =>
+    (seconds < 0
+      ? db.prepare(`UPDATE ${table} SET seconds = seconds + ? WHERE ${keys[0]} = ? AND ${keys[1]} = ?`).bind(seconds, ...values)
+      : db.prepare(`INSERT INTO ${table} (${keys[0]}, ${keys[1]}, seconds) VALUES (?, ?, ?) ON CONFLICT (${keys[0]}, ${keys[1]}) ` +
+          "DO UPDATE SET seconds = seconds + excluded.seconds").bind(...values, seconds)).run();
   return {
     async account(device, month, code) {
       // One round trip for everything a recording needs.
@@ -116,17 +133,27 @@ export function d1Store(db: D1Database): Store {
         credit: (credit.results[0] as { seconds: number } | undefined)?.seconds ?? 0,
       };
     },
+    async reserve(device, month, bucket, seconds, limit, sub, grant) {
+      // An upsert whose update runs only under the limit: no row changes (meta.changes 0) once nothing is left.
+      const held =
+        bucket === "free" ? db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?1, ?2, ?3) ON CONFLICT (device, month) " +
+          "DO UPDATE SET seconds = seconds + excluded.seconds WHERE usage.seconds < ?4").bind(device, month, seconds, limit)
+        : bucket === "grant" && grant ? db.prepare("INSERT INTO grant_usage (grant_id, month, seconds) VALUES (?1, ?2, ?3) " +
+          "ON CONFLICT (grant_id, month) DO UPDATE SET seconds = seconds + excluded.seconds WHERE ?4 IS NULL OR grant_usage.seconds < ?4")
+          .bind(grant.id, month, seconds, limit)
+        : bucket === "sub" && sub ? db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES (?1, ?2, ?3) " +
+          "ON CONFLICT (token, period) DO UPDATE SET seconds = seconds + excluded.seconds WHERE subscription_usage.seconds < ?4")
+          .bind(sub.token, sub.period ?? sub.expiry, seconds, limit)
+        // Bought hours may go below zero while held; charge settles them at zero or more, as before.
+        : bucket === "credit" ? db.prepare("UPDATE credit SET seconds = seconds - ?1 WHERE device = ?2 AND seconds > 0").bind(seconds, device)
+        : null;
+      return !!held && ((await held.run()).meta.changes ?? 0) > 0;
+    },
     async charge(device, month, bucket, seconds, sub, grant) {
-      if (bucket === "grant" && grant) {
-        await db.prepare("INSERT INTO grant_usage (grant_id, month, seconds) VALUES (?, ?, ?) " +
-          "ON CONFLICT (grant_id, month) DO UPDATE SET seconds = seconds + excluded.seconds").bind(grant.id, month, seconds).run();
-      } else if (bucket === "free") {
-        await db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, ?) " +
-          "ON CONFLICT (device, month) DO UPDATE SET seconds = seconds + excluded.seconds").bind(device, month, seconds).run();
-      } else if (bucket === "sub" && sub) {
-        await db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES (?, ?, ?) " +
-          "ON CONFLICT (token, period) DO UPDATE SET seconds = seconds + excluded.seconds").bind(sub.token, sub.period ?? sub.expiry, seconds).run();
-      } else if (bucket === "credit") {
+      if (bucket === "grant" && grant) await add("grant_usage", ["grant_id", "month"], [grant.id, month], seconds);
+      else if (bucket === "free") await add("usage", ["device", "month"], [device, month], seconds);
+      else if (bucket === "sub" && sub) await add("subscription_usage", ["token", "period"], [sub.token, sub.period ?? sub.expiry], seconds);
+      else if (bucket === "credit") {
         await db.prepare("UPDATE credit SET seconds = max(0, seconds - ?) WHERE device = ?").bind(seconds, device).run();
       }
     },

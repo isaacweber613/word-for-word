@@ -31,6 +31,24 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
         ? { id: 1, who: s.grant.who, seconds: s.grant.seconds, used: s.grant.used, device: s.grant.device ?? null } : null;
       return { freeUsed: s.free, grant: g, models: s.models, sub: s.sub ? { ...s.sub, used: s.usage.get(s.sub.period ?? s.sub.expiry) ?? 0 } : null, credit: s.credit };
     },
+    async reserve(_d, _m, bucket: Bucket, seconds, limit, sub) {
+      if (bucket === "grant") {
+        if (!s.grant || (limit != null && s.grant.used >= limit)) return false;
+        s.grant.used += seconds;
+      } else if (bucket === "free") {
+        if (s.free >= limit!) return false;
+        s.free += seconds;
+      } else if (bucket === "sub") {
+        const k = sub!.period ?? sub!.expiry;
+        if ((s.usage.get(k) ?? 0) >= limit!) return false;
+        s.usage.set(k, (s.usage.get(k) ?? 0) + seconds);
+        s.subUsed += seconds;
+      } else {
+        if (!(s.credit > 0)) return false;
+        s.credit -= seconds; // may go below zero while held, as in D1; charge settles it
+      }
+      return true;
+    },
     async charge(_d, _m, bucket: Bucket, seconds, sub) {
       if (bucket === "sub" && sub) s.usage.set(sub.period ?? sub.expiry, (s.usage.get(sub.period ?? sub.expiry) ?? 0) + seconds);
       if (bucket === "grant") s.grant!.used += seconds;

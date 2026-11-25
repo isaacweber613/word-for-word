@@ -16,6 +16,13 @@
  * The OpenRouter key has its own monthly spending limit set on openrouter.ai, which caps the
  * total cost even if someone fakes many phones.
  *
+ * Each recording holds its estimated length on what pays for it before it is sent (Store.reserve), so
+ * many recordings at once can't all pass on the same last second; OpenRouter's measured length replaces
+ * the estimate afterwards. OpenRouter gets only what the app sends (forwardedBody). Optional limits,
+ * all off until set (review, 2026-11-25): OPENROUTER_PAID_KEY, a key just for phones that pay, so free
+ * or given use reaching OPENROUTER_KEY's limit doesn't stop them; MAX_RECORDING_SECONDS; and the rate
+ * limits DEVICE_LIMITER (recordings and purchases per phone) and ADDRESS_LIMITER (phone checks per address).
+ *
  * Only the real Play app may use it (Isaac, 2026-11-22): the app is open source, so anyone could
  * otherwise send made-up device IDs from a computer and get free minutes forever. Once per install
  * the app asks Google Play Integrity to vouch for it (POST /v1/register) and gets a device token
@@ -66,6 +73,17 @@ export interface Env {
   DEVICE_TOKEN_SECRET?: string;
   /** "true" once every call must carry a device token from /v1/register. */
   REQUIRE_INTEGRITY?: string;
+  /**
+   * Optional second OpenRouter key, with its own limit on openrouter.ai, for phones whose subscription pays
+   * now (review, 2026-11-25): with one key for everyone, free or given use that reaches the key's limit
+   * stops paying subscribers too. Unset: every call uses OPENROUTER_KEY, as before.
+   */
+  OPENROUTER_PAID_KEY?: string;
+  /** Optional: the longest recording one call may send, in seconds of audio, estimated from its size. Unset: no limit. */
+  MAX_RECORDING_SECONDS?: string;
+  /** Optional rate limits (wrangler.jsonc "ratelimits"): recordings and purchases per phone, phone checks per address. */
+  DEVICE_LIMITER?: RateLimit;
+  ADDRESS_LIMITER?: RateLimit;
 }
 
 /** The Play products (Play Console, Monetize). */
@@ -263,21 +281,68 @@ export async function takeBackRefunds(a: Account, env: Env, store: Store, device
 }
 
 /**
- * What pays for the next recording: hours given on the Access page first (so a gift never uses up
- * the free minutes or paid hours), then this month's free minutes, then the subscription's
- * hours, then bought hours (only while subscribed). Paying phones get the paid models even on
- * free minutes. Null when nothing is left.
+ * What may pay for the next recording, in the order it pays: hours given on the Access page first (so a
+ * gift never uses up the free minutes or paid hours), then this month's free minutes, then the
+ * subscription's hours, then bought hours (only while subscribed). Paying phones get the paid models
+ * even on free minutes. Empty when nothing is left. With [grantOnly] (no word from Google Play for the
+ * phone), only given hours.
  */
-export function choose(a: Account, now: number, free: number): { bucket: Bucket; paid: boolean } | null {
-  const paying = subscribed(a.sub, now);
+export function choices(a: Account, now: number, free: number, grantOnly = false): { bucket: Bucket; paid: boolean }[] {
+  const out: { bucket: Bucket; paid: boolean }[] = [];
   // Given hours get the paid models and count like paid hours.
-  if (grantLeft(a.grant)) return { bucket: "grant", paid: true };
-  if (a.freeUsed < free) return { bucket: "free", paid: paying };
-  if (!paying) return null;
-  if (a.sub!.used < SUB_SECONDS) return { bucket: "sub", paid: true };
-  if (a.credit > 0) return { bucket: "credit", paid: true };
-  return null;
+  if (grantLeft(a.grant)) out.push({ bucket: "grant", paid: true });
+  if (grantOnly) return out;
+  const paying = subscribed(a.sub, now);
+  if (a.freeUsed < free) out.push({ bucket: "free", paid: paying });
+  if (paying && a.sub!.used < SUB_SECONDS) out.push({ bucket: "sub", paid: true });
+  if (paying && a.credit > 0) out.push({ bucket: "credit", paid: true });
+  return out;
 }
+
+/** What pays for the next recording (the first of choices), or null when nothing is left. */
+export function choose(a: Account, now: number, free: number): { bucket: Bucket; paid: boolean } | null {
+  return choices(a, now, free)[0] ?? null;
+}
+
+/** The most [bucket] holds in plan seconds, for Store.reserve; null for no limit (unlimited hours, bought hours). */
+function limitOf(bucket: Bucket, a: Account, free: number): number | null {
+  return bucket === "free" ? free : bucket === "grant" ? a.grant?.seconds ?? null : bucket === "sub" ? SUB_SECONDS : null;
+}
+
+/** What a phone puts in a recording's body (TranscriberClient.buildBodyJson). */
+interface TranscriptionBody {
+  model?: unknown; language?: unknown; input_audio?: { data?: unknown; format?: unknown }; provider?: unknown;
+}
+
+/**
+ * The request OpenRouter gets for [model]: only what the app sends, the audio, its format and language and
+ * each provider's verbatim switch (review, 2026-11-25: everything else in the phone's body went on to
+ * OpenRouter with the server's key, so a phone could pick OpenRouter's providers and fallbacks, turn on
+ * extras that providers charge more for, or add a link for the provider to download audio from).
+ */
+export function forwardedBody(body: TranscriptionBody, data: string, format: string, model: string): Record<string, unknown> {
+  const out: Record<string, unknown> = { model, input_audio: { data, format } };
+  if (typeof body.language === "string") out.language = body.language;
+  const options = styleOptions(body.provider);
+  if (options) out.provider = { options };
+  return out;
+}
+
+/** The app's verbatim switch for each provider (TranscriberClient.styleOptions), each only as the app sends it. */
+function styleOptions(provider: unknown): Record<string, unknown> | null {
+  const o = (provider as { options?: Record<string, Record<string, unknown> | undefined> } | null)?.options;
+  if (!o || typeof o !== "object") return null;
+  const out: Record<string, unknown> = {};
+  const style = (o.azure?.enhancedMode as { modelOptions?: { transcribeStyle?: unknown } } | undefined)?.modelOptions?.transcribeStyle;
+  if (style === "verbatim" || style === "clean") out.azure = { enhancedMode: { modelOptions: { transcribeStyle: style } } };
+  if (typeof o.elevenlabs?.no_verbatim === "boolean") out.elevenlabs = { no_verbatim: o.elevenlabs.no_verbatim };
+  if (typeof o.deepgram?.filler_words === "boolean") out.deepgram = { filler_words: o.deepgram.filler_words };
+  if (typeof o.assemblyai?.disfluencies === "boolean") out.assemblyai = { disfluencies: o.assemblyai.disfluencies };
+  return Object.keys(out).length ? out : null;
+}
+
+/** The audio formats the app sends: Ogg Opus, and WAV below Android 10 or when a model refuses the Ogg. */
+const FORMATS = ["ogg", "wav"];
 
 function error(status: number, message: string, code?: string): Response {
   return Response.json({ error: { message, ...(code ? { code } : {}) } }, { status });
@@ -374,8 +439,19 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   const free = Number(env.FREE_SECONDS_PER_MONTH);
   const month = monthOf(now);
   const later = async (work: Promise<unknown>) => { if (defer) defer(work); else await work; };
+  const post = request.method === "POST";
 
-  if (url.pathname === "/v1/register" && request.method === "POST") {
+  // Optional rate limits, before any database read or call to Google or OpenRouter. The phone check takes
+  // anyone, so it counts per address; the others per phone.
+  const limit = url.pathname === "/v1/register" && post
+    ? { by: env.ADDRESS_LIMITER, key: "register:" + (request.headers.get("CF-Connecting-IP") ?? "") }
+    : (url.pathname === "/v1/transcriptions" || url.pathname === "/v1/purchases") && post && device
+    ? { by: env.DEVICE_LIMITER, key: "phone:" + device } : null;
+  if (limit?.by && !(await limit.by.limit({ key: limit.key })).success) {
+    return error(429, "Too many requests right now. Wait a moment and try again.", "rate_limited");
+  }
+
+  if (url.pathname === "/v1/register" && post) {
     if (!device) return error(400, "Missing device ID.");
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
     const token = body.integrity_token;
@@ -422,8 +498,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
       await takeBackRefunds(account, env, store, device, now.getTime(), fetcher, later);
     }
   }
-  const pickFor = (a: Account) => grantOnly ? (grantLeft(a.grant) ? { bucket: "grant" as Bucket, paid: true } : null)
-    : choose(a, now.getTime(), free);
+  const pickFor = (a: Account) => choices(a, now.getTime(), free, grantOnly)[0] ?? null;
 
   if (url.pathname === "/v1/usage" && request.method === "GET") {
     if (!device || !account) return error(400, "Missing device ID.");
@@ -463,7 +538,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   if (url.pathname !== "/v1/transcriptions" || request.method !== "POST") return error(404, "Not found.");
   if (!device) return error(400, "Missing device ID.");
 
-  let body: { model?: unknown; language?: unknown; input_audio?: { data?: unknown; format?: unknown } };
+  let body: TranscriptionBody;
   try {
     body = await request.json();
   } catch {
@@ -471,41 +546,61 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   }
   const audio = body.input_audio?.data;
   if (typeof audio !== "string" || audio.length === 0) return error(400, "No audio in the request.");
-  const format = typeof body.input_audio?.format === "string" ? body.input_audio.format : "wav";
+  const format = body.input_audio?.format ?? "wav";
+  if (typeof format !== "string" || !FORMATS.includes(format)) return error(400, "Unsupported audio format.");
+  // The recording's length from its size, before anything is sent; what OpenRouter measures replaces it afterwards.
+  const estimate = audioSeconds("", audio, format);
+  const longest = Number(env.MAX_RECORDING_SECONDS);
+  if (env.MAX_RECORDING_SECONDS && Number.isFinite(longest) && estimate > longest) {
+    return error(413, "That recording is too long to send in one piece. Try a shorter one.", "too_long");
+  }
 
   const a = account ?? await store.account(device, month, code);
-  const pick = pickFor(a);
+  // Holds the estimate on what pays, in one statement that refuses once nothing is left, before the audio goes
+  // out (review, 2026-11-25: the time was only checked before and counted after, so many recordings sent at
+  // once on a phone's, a code's or a subscription's last second were all typed and paid for by Isaac).
+  let pick: { bucket: Bucket; paid: boolean } | null = null;
+  for (const p of choices(a, now.getTime(), free, grantOnly)) {
+    if (await store.reserve(device, month, p.bucket, estimate, limitOf(p.bucket, a, free), a.sub, a.grant)) { pick = p; break; }
+  }
   if (!pick) return outOfTime(a, now.getTime(), free);
 
+  const key = env.OPENROUTER_PAID_KEY && !grantOnly && subscribed(a.sub, now.getTime()) ? env.OPENROUTER_PAID_KEY : env.OPENROUTER_KEY;
   const send = (b: object) => fetcher(OPENROUTER_URL, {
     method: "POST",
-    headers: { "Authorization": "Bearer " + env.OPENROUTER_KEY, "Content-Type": "application/json", "X-Title": "Word for Word" },
+    headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Title": "Word for Word" },
     body: JSON.stringify(b),
   });
 
   // The main model, then each backup when the one before is missing, busy or down.
   let status = 502, text = JSON.stringify({ error: { message: "No model answered." } }), used: ModelChoice | null = null;
-  for (const model of pick.paid ? a.models.paid : a.models.free) {
-    let b: Record<string, unknown> = { ...body, model: model.id };
-    let res = await send(b);
-    text = await res.text();
-    if ("language" in b && (res.status === 400 || res.status === 422) && !text.includes("does not exist")) {
-      // The model refused the language: send again and let it guess.
-      const { language: _drop, ...rest } = b;
-      b = rest;
-      res = await send(b);
+  try {
+    for (const model of pick.paid ? a.models.paid : a.models.free) {
+      let b = forwardedBody(body, audio, format, model.id);
+      let res = await send(b);
       text = await res.text();
+      if ("language" in b && (res.status === 400 || res.status === 422) && !text.includes("does not exist")) {
+        // The model refused the language: send again and let it guess.
+        const { language: _drop, ...rest } = b;
+        b = rest;
+        res = await send(b);
+        text = await res.text();
+      }
+      status = res.status;
+      used = model;
+      if (res.ok || !tryAnother(res.status, text)) break;
     }
-    status = res.status;
-    used = model;
-    if (res.ok || !tryAnother(res.status, text)) break;
+  } catch (e) {
+    console.error("OpenRouter couldn't be reached:", e instanceof Error ? e.message : String(e));
+    status = 502;
+    text = JSON.stringify({ error: { message: "No model answered." } });
   }
 
-  // Only audio that came back as text counts. The count is saved after the answer goes back.
-  if (status >= 200 && status < 300 && used) {
-    await later(store.charge(device, month, pick.bucket, planSeconds(text, audio, format, used,
-      pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR), a.sub, a.grant));
-  }
+  // Only audio that came back as text counts: the estimate held becomes what OpenRouter measured, or is
+  // given back. Saved after the answer goes back.
+  const typed = status >= 200 && status < 300 && used;
+  const charged = typed ? planSeconds(text, audio, format, used!, pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR) : 0;
+  if (charged !== estimate) await later(store.charge(device, month, pick.bucket, charged - estimate, a.sub, a.grant));
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
 }
 
