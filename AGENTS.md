@@ -227,6 +227,12 @@ had asked 254 times), and PostHog `device_check` carries `google_error`.
   Releases never set it.
 - The daily task that turns the block on (T3 Code "Turn on Play Integrity enforcement when ready") reads this
   table too, and a failing phone Isaac gave hours to no longer holds the block back.
+- Shipped 2026-11-24: server Worker 255d034f (D1 got `failed_checks` and `grants.device` by hand, see
+  schema.sql), yiddishvoicetotext site ee9a6441 (commit 1d3c65f), app d43e5b3 as 0.9.17 (versionCode 54) on
+  GitHub, Play internal testing, and in Google's review for closed testing. Play APK 2,719,223 bytes (0.9.16:
+  2,718,858). Checked on the emulator against preview `strictcheck` (REQUIRE_INTEGRITY true): Play Integrity
+  gave -9, the phone showed on the page, Give, then a shared 6 s recording was typed and counted on the given
+  hours, not the free minutes. The test rows were deleted afterwards.
 
 ## Testing the keyboard shortcut on an emulator
 
