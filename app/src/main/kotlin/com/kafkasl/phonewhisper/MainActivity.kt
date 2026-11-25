@@ -231,6 +231,11 @@ class MainActivity : AppCompatActivity() {
         planRow.visibility = if (Billing.available) View.VISIBLE else View.GONE
         root.addView(planRow)
 
+        // Hours someone gave you on the access page (Access): Google sign-in in the Play build, a typed code elsewhere.
+        accessRow = settingsRow(if (GoogleAccount.available) "Sign in with Google" else "Access code", "") { onAccessTap() }
+        accessRowSub = accessRow.findViewWithTag("subtitle")
+        root.addView(accessRow)
+
         val keyRow = settingsRow("OpenRouter API Key", "Tap to set") { promptApiKey() }
         keyRowSub = keyRow.findViewWithTag("subtitle")
         root.addView(keyRow)
@@ -362,7 +367,7 @@ class MainActivity : AppCompatActivity() {
         val usePostProcessing = prefs().getBoolean("use_post_processing", false)
         val hasKey = !prefs().getString("api_key", "").isNullOrBlank()
         // The Play build's free minutes need no key; cleanup (post-processing) still does.
-        val canTranscribe = hasKey || FreeMinutes.available
+        val canTranscribe = hasKey || FreeMinutes.available || Access.code(this) != null
         return when {
             !hasPerm(Manifest.permission.RECORD_AUDIO) -> SetupStep.MIC
             WhisperAccessibilityService.instance == null -> SetupStep.ACCESSIBILITY
@@ -519,6 +524,58 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton("Close", null)
             .show()
+    }
+
+    private lateinit var accessRow: View
+    private lateinit var accessRowSub: TextView
+
+    private fun onAccessTap() {
+        val done: (Access.Answer) -> Unit = { answer ->
+            runOnUiThread {
+                if (isFinishing) return@runOnUiThread
+                android.app.AlertDialog.Builder(this)
+                    .setMessage(answer.error ?: "You're using the hours given to ${answer.who}.")
+                    .setPositiveButton("OK", null).show()
+                loadFreeMinutes()
+                refresh()
+            }
+        }
+        val who = Access.who(this)
+        if (Access.code(this) != null) {
+            android.app.AlertDialog.Builder(this)
+                .setMessage("Stop using the hours given to $who on this phone?")
+                .setPositiveButton("Stop") { _, _ ->
+                    Access.clear(this)
+                    GoogleAccount.signOut(this)
+                    refresh()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        } else if (GoogleAccount.available) {
+            GoogleAccount.signIn(this) { idToken, error ->
+                when {
+                    idToken != null -> Access.useGoogle(this, idToken, done)
+                    error != null -> done(Access.Answer(null, error))
+                }
+            }
+        } else {
+            val input = android.widget.EditText(this).apply {
+                hint = "XXXX-XXXX-XXXX"
+                inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS
+                isSingleLine = true
+            }
+            val box = android.widget.FrameLayout(this).apply {
+                val pad = (20 * resources.displayMetrics.density).toInt()
+                setPadding(pad, pad / 2, pad, 0)
+                addView(input)
+            }
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Access code")
+                .setView(box)
+                .setPositiveButton("Use") { _, _ -> Access.useCode(this, input.text.toString(), done) }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
     }
 
     private var freeMinutesText = "Optional. Without a key you get free minutes each month"
@@ -824,7 +881,7 @@ class MainActivity : AppCompatActivity() {
         languageRow.visibility = if (useLocal) View.GONE else View.VISIBLE
         val language = prefs().getString("language", "auto") ?: "auto"
         languageRowSub.text = when {
-            language == "yi" && YiddishServer.available -> "Yiddish: hold the mic button for Yiddish. A quick tap stays Auto"
+            language == "yi" && YiddishServer.available(this) -> "Yiddish: hold the mic button for Yiddish. A quick tap stays Auto"
             language in modelLanguages -> TranscriberClient.LANGUAGES[language]
             language == "auto" -> "Auto: the model guesses"
             else -> "Auto: no ${TranscriberClient.LANGUAGES[language]} on this model"
@@ -844,7 +901,14 @@ class MainActivity : AppCompatActivity() {
                 else -> "10 hours of dictation a month for \$3"
             }
         }
-        keyRowSub.text = if (apiKey.isBlank() && FreeMinutes.available && FreeMinutes.subscribed(this)) "Optional"
+        val accessWho = Access.who(this)
+        accessRowSub.text = when {
+            Access.code(this) == null -> "To use hours someone gave you"
+            GoogleAccount.available -> "Signed in as $accessWho"
+            else -> "Using the hours given to $accessWho"
+        }
+        keyRowSub.text = if (apiKey.isBlank() && (Access.code(this) != null ||
+                                FreeMinutes.available && FreeMinutes.subscribed(this))) "Optional"
                          else if (apiKey.isBlank() && FreeMinutes.available) freeMinutesText
                          else if (apiKey.isBlank()) "Tap to set" 
                          else if (apiKey.length > 7) "${apiKey.take(6)}...${apiKey.takeLast(4)}" 
@@ -861,7 +925,7 @@ class MainActivity : AppCompatActivity() {
 
         // Ready logic
         val localReady = useLocal && hasModel
-        val cloudReady = !useLocal && (hasKey || FreeMinutes.available)
+        val cloudReady = !useLocal && (hasKey || FreeMinutes.available || Access.code(this) != null)
         val postReady = !usePostProcessing || hasKey
         val ready = audio && acc && (localReady || cloudReady) && postReady
 
@@ -1187,7 +1251,7 @@ class MainActivity : AppCompatActivity() {
     private fun pickLanguage() {
         val model = currentModel()
         // Yiddish is always offered where Yiddish takes go to the Yiddish model, whatever the cloud model.
-        val keys = listOf("auto") + (TranscriberClient.languagesFor(model) + listOfNotNull("yi".takeIf { YiddishServer.available })).distinct()
+        val keys = listOf("auto") + (TranscriberClient.languagesFor(model) + listOfNotNull("yi".takeIf { YiddishServer.available(this) })).distinct()
         val names = keys.map { if (it == "auto") "Auto" else TranscriberClient.LANGUAGES[it] }.toTypedArray()
         val current = keys.indexOf(prefs().getString("language", "auto")).coerceAtLeast(0)
         android.app.AlertDialog.Builder(this)

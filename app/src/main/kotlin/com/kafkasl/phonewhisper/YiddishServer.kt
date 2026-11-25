@@ -23,19 +23,21 @@ import kotlin.concurrent.thread
  * Isaac (2026-11-24): "I don't want everyone to be able to do that." Every take carries the
  * phone's ID and device token ([FreeMinutes.identify]), and the Worker asks Word for Word's server
  * (server/) whether the phone has time left, whatever OpenRouter key is typed, then counts the
- * take there. No phone is exempt. Builds not from Google Play get no device token, so they don't
- * offer these takes at all ([available]); there Yiddish is a normal language for the cloud model.
+ * take there. No phone is exempt. Builds not from Google Play get no device token, so they offer
+ * these takes only with an access code (Access, 2026-11-24), which the server checks instead
+ * ([available]); without one, Yiddish is a normal language for the cloud model there.
  */
 object YiddishServer {
     private const val BASE = "https://yiddishtry.ynbsd6242.workers.dev"
     // The Worker's password for its try-it page; it gates the PC model and the saved takes.
     private const val PASSWORD = "4837"
 
-    /** Only the Play build, which has free minutes and the subscription to count these takes against. */
-    val available get() = FreeMinutes.available
+    /** The Play build (free minutes and the subscription count these takes), or any build with an access code. */
+    fun available(p: SharedPreferences) = FreeMinutes.available || Access.code(p) != null
+    fun available(context: Context) = available(context.getSharedPreferences("phonewhisper", Context.MODE_PRIVATE))
 
     fun enabled(p: SharedPreferences) =
-        available && p.getString("language", "auto") == "yi"
+        available(p) && p.getString("language", "auto") == "yi"
 
     /** Pref: the person agreed to [DISCLOSURE]. */
     const val CONSENT = "yiddish_training_consent"
@@ -211,7 +213,7 @@ object YiddishServer {
         else "Couldn't reach the Yiddish model. Try again.")
 
     /** Word for Word's server's answers when nothing is left (server/src/index.ts yiddishCheck). */
-    private val OUT_CODES = setOf("free_minutes_used", "hours_used")
+    private val OUT_CODES = setOf("free_minutes_used", "hours_used", "given_hours_used")
 
     private fun failure(context: Context, code: Int, json: JSONObject?): TranscriberClient.Result {
         val errorCode = json?.optString("code").orEmpty()
@@ -220,6 +222,7 @@ object YiddishServer {
             code == 503 -> "The Yiddish model is offline right now (the computer running it is off)."
             errorCode == "free_minutes_used" -> FreeMinutes.OUT_FREE
             errorCode == "hours_used" -> FreeMinutes.OUT_HOURS
+            errorCode == "given_hours_used" -> FreeMinutes.OUT_GIVEN
             errorCode == "device_unverified" ->
                 "Yiddish works only in Word for Word from Google Play, on a phone that passes Google Play's checks."
             else -> "The Yiddish model had a problem (${json?.optString("error")?.takeIf { it.isNotBlank() } ?: code}). Try again."

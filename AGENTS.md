@@ -174,6 +174,35 @@ Paid hours count 1:1 on any model up to $0.15 an hour and faster above it (free 
 - Isaac picks the models himself (main and backups, free and paid) on a model page; agents don't
   pick or benchmark them for him: "just leave the model picking for me."
 
+## Hours given without a subscription (Isaac, 2026-11-24, built in 0.9.15)
+
+"Make me a way to give access, for people, without subscribing ... I should be able to choose how many
+monthly hours I give them ... 50 hours or unlimited, whatever number I want." Isaac adds a person on his
+own web page (Access tab, next to Models; it writes this server's D1 tables `grants` and `grant_usage`),
+with hours a month or unlimited (empty box), and sees each person's use this month. Each person gets a
+12-character access code (`server/src/index.ts`, `accessCode`). Every call with header `X-Access-Code`
+uses those hours first, before free minutes and the subscription, on the paid models at the paid rate
+($0.15 an hour per plan second), shared by every phone with the code, reset each UTC month. A valid code
+stands in for the Play Integrity device token. Used up: 402 `given_hours_used`. Removing a person stops
+the code at the next call, and the app forgets it (`/v1/usage` answers `access: null`).
+
+- Play build: Settings, "Sign in with Google" (`src/play/.../GoogleAccount.kt`, Credential Manager,
+  `GetSignInWithGoogleOption`). The ID token goes to `POST /v1/access/google`; the server checks it with
+  Google's keys (audience = `GOOGLE_WEB_CLIENT_ID` in `server/wrangler.jsonc`) and answers the code for
+  hours given to that email, or 404 `no_access`. Google Cloud project "Word for Word"
+  (word-for-word-515315), Google Auth Platform, published to production 2026-11-24, no logo (a logo
+  needs Google's review): web client "Word for Word server", and Android clients for package
+  `com.isaacweber.wordforword` with the Play signing key (SHA-1 16:44:A1:...:93:31), the upload key
+  (A5:07:...:1E:18) and the debug key (93:5B:...:8C:12). googleid stays on 1.1.x: 1.2 needs Android 7.
+- GitHub builds: Settings, "Access code", typed (`Access.useCode`). They now have `SERVICE_URL` too,
+  but use the server only with a code; without one they still need the person's own key.
+- Size: the Play APK went from 2,717,040 to 2,909,841 bytes (+7.1%; code +178 KB, library strings
+  +95 KB), over the 5% rule, so the Play build with sign-in waits for Isaac's OK. GitHub APK:
+  2,308,468 to 2,311,216.
+- Play policy: free hours are not a sale, so Play Billing doesn't apply (Payments policy). The Data
+  safety form needs Email address (collected, processed ephemerally, optional, app functionality and
+  account management) when the build with sign-in goes to Play. PRIVACY.md has the section.
+
 ## Testing the keyboard shortcut on an emulator
 
 `adb shell input keyevent` and `input keycombination` never reach accessibility services, so

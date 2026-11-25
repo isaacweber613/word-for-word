@@ -50,3 +50,24 @@ CREATE TABLE IF NOT EXISTS topups (
   seconds REAL NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+-- People Isaac gives hours to without a subscription (yiddishvoicetotext.com, Access tab; that site's
+-- src/access.js writes this table). who is a Google email (the Play app signs in with Google and gets the
+-- code) or a name for someone on a GitHub build, who types the code. seconds is plan seconds a month;
+-- NULL is unlimited. code is the access code without dashes.
+CREATE TABLE IF NOT EXISTS grants (
+  id INTEGER PRIMARY KEY,
+  who TEXT NOT NULL,
+  code TEXT NOT NULL UNIQUE,
+  seconds REAL,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS grants_who ON grants (lower(who));
+
+-- Plan seconds each grant used per month ("2026-11", UTC), across all its phones.
+CREATE TABLE IF NOT EXISTS grant_usage (
+  grant_id INTEGER NOT NULL,
+  month TEXT NOT NULL,
+  seconds REAL NOT NULL,
+  PRIMARY KEY (grant_id, month)
+);

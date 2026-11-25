@@ -205,16 +205,18 @@ object TranscriberClient {
     /**
      * With [deviceId] set (the Play build with no key entered, see FreeMinutes), the audio goes
      * to Word for Word's server, which uses its own OpenRouter key and counts free minutes.
-     * [deviceToken] is the token the server gave once Google Play vouched for the phone.
+     * [deviceToken] is the token the server gave once Google Play vouched for the phone; [accessCode]
+     * is the code for hours given on the access page (Access).
      */
     fun transcribe(wavData: ByteArray, apiKey: String, model: String, verbatim: Boolean, language: String,
                    deviceId: String? = null, format: String = "wav", deviceToken: String? = null,
-                   callback: (Result) -> Unit) {
+                   accessCode: String? = null, callback: (Result) -> Unit) {
         val viaServer = deviceId != null
         val builder = Request.Builder()
         if (viaServer) {
             builder.url(serverUrl).header("X-Device-Id", deviceId!!)
             deviceToken?.let { builder.header("X-Device-Token", it) }
+            accessCode?.let { builder.header("X-Access-Code", it) }
         } else {
             builder.url(openRouterUrl)
                 .header("Authorization", "Bearer $apiKey")
@@ -235,7 +237,7 @@ object TranscriberClient {
                 if (languageSent && (response.code == 400 || response.code == 422) &&
                     !body.contains("does not exist")) {
                     // The model refused the language: send again and let it guess.
-                    transcribe(wavData, apiKey, model, verbatim, "auto", deviceId, format, deviceToken, callback)
+                    transcribe(wavData, apiKey, model, verbatim, "auto", deviceId, format, deviceToken, accessCode, callback)
                 } else if (response.isSuccessful) {
                     callback(parseResponse(body).copy(servedBy = response.header("X-Model")))
                 } else {
@@ -262,6 +264,7 @@ object TranscriberClient {
             // The paid plan comes first (Isaac, 2026-11-20); your own key stays an option in Settings.
             errorCode == "free_minutes_used" -> FreeMinutes.OUT_FREE
             errorCode == "hours_used" -> FreeMinutes.OUT_HOURS
+            errorCode == "given_hours_used" -> FreeMinutes.OUT_GIVEN
             // Google Play didn't vouch for this phone (FreeMinutes.register).
             errorCode == "device_unverified" ->
                 "Free minutes work only in Word for Word from Google Play, on a phone that passes Google Play's checks. " +

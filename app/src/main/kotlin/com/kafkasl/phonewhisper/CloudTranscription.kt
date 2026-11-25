@@ -47,15 +47,16 @@ object CloudTranscription {
     fun run(context: Context, wav: ByteArray, stream: OggOpus.Stream? = null, callback: (Outcome) -> Unit) {
         val p = prefs(context)
         val apiKey = p.getString("api_key", "") ?: ""
-        // The Play build with no key entered uses Word for Word's server and its free minutes.
+        // With no key entered, the Play build (free minutes) or any build with an access code uses Word for Word's server.
         val deviceId = if (FreeMinutes.inUse(context)) FreeMinutes.deviceId(context) else null
+        val accessCode = if (deviceId != null) Access.code(context) else null
         // With free minutes, Word for Word picks the model; the picker is hidden.
         val model = if (deviceId != null) TranscriberClient.DEFAULT_MODEL
                     else p.getString("cloud_model", TranscriberClient.DEFAULT_MODEL) ?: TranscriberClient.DEFAULT_MODEL
         val verbatim = p.getBoolean("verbatim", false)
         // With Yiddish picked, Yiddish audio goes to the Yiddish model; anything else lets the model guess.
         // Builds without Yiddish takes send Yiddish to the cloud model like any language (YiddishServer.available).
-        val language = (p.getString("language", "auto") ?: "auto").let { if (it == "yi" && YiddishServer.available) "auto" else it }
+        val language = (p.getString("language", "auto") ?: "auto").let { if (it == "yi" && YiddishServer.available(p)) "auto" else it }
         // Audio length to a tenth of a second (32,000 bytes a second after the 44-byte header), for usage stats.
         val seconds = Math.round((wav.size - 44) / 3200.0) / 10.0
 
@@ -66,11 +67,11 @@ object CloudTranscription {
         var compressMs = 0L
         var deviceToken: String? = null
         fun sendWav(m: String, cb: (TranscriberClient.Result) -> Unit) =
-            TranscriberClient.transcribe(wav, apiKey, m, verbatim, language, deviceId, "wav", deviceToken, cb)
+            TranscriberClient.transcribe(wav, apiKey, m, verbatim, language, deviceId, "wav", deviceToken, accessCode, cb)
         fun send(m: String, cb: (TranscriberClient.Result) -> Unit) {
             val small = ogg
             if (small == null || m !in builtIn) return sendWav(m, cb)
-            TranscriberClient.transcribe(small, apiKey, m, verbatim, language, deviceId, "ogg", deviceToken) { r ->
+            TranscriberClient.transcribe(small, apiKey, m, verbatim, language, deviceId, "ogg", deviceToken, accessCode) { r ->
                 if (r.code == 400) { Log.i(TAG, "$m refused Ogg audio; sending WAV"); sendWav(m, cb) } else cb(r)
             }
         }
@@ -97,7 +98,7 @@ object CloudTranscription {
             } else if (!result.text.isNullOrBlank()) {
                 FreeMinutes.remember(context, out = false)
                 done(result.text, result.servedBy ?: model, result.servedBy ?: model)
-            } else if (result.errorCode == "free_minutes_used" || result.errorCode == "hours_used") {
+            } else if (result.errorCode in setOf("free_minutes_used", "hours_used", "given_hours_used")) {
                 FreeMinutes.remember(context, out = true)
                 if (Billing.available && !retried) {
                     Billing.sync(context) { left ->

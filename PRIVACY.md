@@ -1,6 +1,6 @@
 # Privacy policy for Word for Word
 
-Last updated: November 22, 2026. Developer: Isaac Weber.
+Last updated: November 24, 2026. Developer: Isaac Weber.
 
 Word for Word is an Android dictation app. You tap a floating button, speak, and the app types your exact words into the text box you're in.
 
@@ -13,6 +13,12 @@ For free minutes, the app also sends a SHA-256 hash of its Android device ID. Th
 To stop free minutes from being used by anything other than the Play Store app, the Play Store build asks Google Play Integrity, once per install, to confirm that it is the app from Google Play on a phone that passes Google Play's basic checks. Google Play handles that check under its own terms and gives the app a token tied to the same device hash. The app sends the token to Word for Word's server, which asks Google to read it, keeps nothing from it, and gives the phone a code it sends with each later request.
 
 If you subscribe or buy extra hours in the Play Store build, Google Play takes the payment. The app sends the purchase token Google Play gives it to Word for Word's server, with the same device hash. The server checks the purchase with Google and stores the token, the product, when the paid month ends, the hash of each phone it is used on, and the time used and left. Word for Word never receives your card details, name or Google account.
+
+## Hours given to you
+
+The developer can give a person hours each month without a subscription. Each person gets an access code. In the Play Store build you get it by tapping Sign in with Google in Settings: Google shows its own account picker and gives the app a token that confirms your Google account's email address, name and profile picture. The app sends that token to Word for Word's server, which asks Google's public keys whether it is real and reads only the email address, to look up whether hours were given to it. The server doesn't store the token or anything from it. If hours were given, the app receives the access code and keeps it on your phone. In the GitHub builds you type the code instead.
+
+The developer's list of people with hours holds the email address or name he typed for each person, their code and their monthly hours. The app sends the code with each recording, and the server stores the time used per code per month. Stopping in Settings removes the code from your phone.
 
 When you share an audio or video file to Word for Word from another app, the app takes its sound on your phone and sends it the same way as a recording. The text is copied to your clipboard and saved in History.
 
@@ -60,7 +66,7 @@ PostHog never receives your recordings, your words, your transcription history, 
 
 ## Data collection
 
-Word for Word has no accounts, no ads, and no crash reporting. The developer's services process free-minute recordings in transit and retain Yiddish takes and usage records as described above. Your own OpenRouter API key is not sent to the developer's servers.
+Word for Word has no accounts of its own, no ads, and no crash reporting. Signing in with Google is optional and only for hours given to you. The developer's services process free-minute recordings in transit and retain Yiddish takes and usage records as described above. Your own OpenRouter API key is not sent to the developer's servers.
 
 Network services, including Cloudflare, OpenRouter, model providers, and PostHog, receive network metadata such as your internet address. Their terms and privacy policies also apply. Analytics retention depends on the hosted PostHog project; this app does not enforce a remote deletion schedule.
 

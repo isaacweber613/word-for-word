@@ -17,8 +17,16 @@ export const DEFAULT_MODELS: Models = {
 /** A Google Play subscription linked to the phone. [expiry] is the end of the paid month, in ms. */
 export interface Sub { token: string; product: string; expiry: number }
 
+/**
+ * Hours Isaac gave a person on his Access page, shared by every phone with its access code.
+ * [seconds] is plan seconds a month, null for unlimited; [used] is this month's.
+ */
+export interface Grant { id: number; who: string; seconds: number | null; used: number }
+
 export interface Account {
   freeUsed: number;
+  /** The grant for the access code the call carried, or null (no code, or a removed one). */
+  grant: Grant | null;
   models: Models;
   /** The phone's latest subscription (maybe expired), with the plan seconds used this paid month. */
   sub: (Sub & { used: number }) | null;
@@ -26,11 +34,14 @@ export interface Account {
   credit: number;
 }
 
-export type Bucket = "free" | "sub" | "credit";
+export type Bucket = "grant" | "free" | "sub" | "credit";
 
 export interface Store {
-  account(device: string, month: string): Promise<Account>;
-  charge(device: string, month: string, bucket: Bucket, seconds: number, sub: Sub | null): Promise<void>;
+  /** [code] is the access code the call carried (normalized, see accessCode), or null. */
+  account(device: string, month: string, code?: string | null): Promise<Account>;
+  charge(device: string, month: string, bucket: Bucket, seconds: number, sub: Sub | null, grant?: Grant | null): Promise<void>;
+  /** The access code given to [email] (a Google email), or null when no hours were given to it. */
+  codeFor(email: string): Promise<string | null>;
   saveSubscription(device: string, sub: Sub): Promise<void>;
   /** Adds a bought top-up once. False when this purchase was already counted. */
   addTopup(token: string, device: string, seconds: number, now: number): Promise<boolean>;
@@ -46,9 +57,9 @@ function parseModels(json: string | undefined, fallback: ModelChoice[]): ModelCh
 
 export function d1Store(db: D1Database): Store {
   return {
-    async account(device, month) {
+    async account(device, month, code) {
       // One round trip for everything a recording needs.
-      const [free, models, sub, credit] = await db.batch([
+      const [free, models, sub, credit, grant] = await db.batch([
         db.prepare("SELECT seconds FROM usage WHERE device = ? AND month = ?").bind(device, month),
         db.prepare("SELECT tier, models FROM models"),
         db.prepare(
@@ -57,17 +68,23 @@ export function d1Store(db: D1Database): Store {
           "LEFT JOIN subscription_usage u ON u.token = s.token AND u.period = s.expiry " +
           "WHERE d.device = ? ORDER BY s.expiry DESC LIMIT 1").bind(device),
         db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(device),
+        db.prepare("SELECT g.id, g.who, g.seconds, coalesce(u.seconds, 0) AS used FROM grants g " +
+          "LEFT JOIN grant_usage u ON u.grant_id = g.id AND u.month = ? WHERE g.code = ?").bind(month, code ?? ""),
       ]);
       const tiers = Object.fromEntries((models.results as { tier: string; models: string }[]).map((r) => [r.tier, r.models]));
       return {
         freeUsed: (free.results[0] as { seconds: number } | undefined)?.seconds ?? 0,
+        grant: (grant.results[0] as Grant | undefined) ?? null,
         models: { free: parseModels(tiers.free, DEFAULT_MODELS.free), paid: parseModels(tiers.paid, DEFAULT_MODELS.paid) },
         sub: (sub.results[0] as (Sub & { used: number }) | undefined) ?? null,
         credit: (credit.results[0] as { seconds: number } | undefined)?.seconds ?? 0,
       };
     },
-    async charge(device, month, bucket, seconds, sub) {
-      if (bucket === "free") {
+    async charge(device, month, bucket, seconds, sub, grant) {
+      if (bucket === "grant" && grant) {
+        await db.prepare("INSERT INTO grant_usage (grant_id, month, seconds) VALUES (?, ?, ?) " +
+          "ON CONFLICT (grant_id, month) DO UPDATE SET seconds = seconds + excluded.seconds").bind(grant.id, month, seconds).run();
+      } else if (bucket === "free") {
         await db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, ?) " +
           "ON CONFLICT (device, month) DO UPDATE SET seconds = seconds + excluded.seconds").bind(device, month, seconds).run();
       } else if (bucket === "sub" && sub) {
@@ -76,6 +93,10 @@ export function d1Store(db: D1Database): Store {
       } else if (bucket === "credit") {
         await db.prepare("UPDATE credit SET seconds = max(0, seconds - ?) WHERE device = ?").bind(seconds, device).run();
       }
+    },
+    async codeFor(email) {
+      const r = await db.prepare("SELECT code FROM grants WHERE lower(who) = lower(?)").bind(email).first<{ code: string }>();
+      return r?.code ?? null;
     },
     async saveSubscription(device, sub) {
       await db.batch([

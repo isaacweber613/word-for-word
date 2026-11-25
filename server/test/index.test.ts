@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds,
+  accessCode, audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds,
   yiddishCharge, yiddishCheck, type Env,
 } from "../src/index";
-import { DEFAULT_MODELS, type Account, type Bucket, type Models, type Store, type Sub } from "../src/store";
+import { DEFAULT_MODELS, type Account, type Bucket, type Grant, type Models, type Store, type Sub } from "../src/store";
 
 const device = "a".repeat(64);
 const env = { OPENROUTER_KEY: "test-key", FREE_SECONDS_PER_MONTH: "1800" } as Env;
@@ -11,20 +11,25 @@ const now = new Date("2026-11-06T12:00:00Z");
 const later = now.getTime() + 20 * 86400_000;
 
 /** The D1 store in memory. */
-function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | null; subUsed: number; credit: number }> = {}) {
+function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | null; subUsed: number; credit: number;
+                                    grant: { code: string; who: string; seconds: number | null; used?: number } }> = {}) {
   const s = {
     free: init.free ?? 0, models: init.models ?? DEFAULT_MODELS, sub: init.sub ?? null,
     subUsed: init.subUsed ?? 0, credit: init.credit ?? 0, topups: new Set<string>(),
+    grant: init.grant ? { used: 0, ...init.grant } : null,
   };
   const store: Store = {
-    async account(): Promise<Account> {
-      return { freeUsed: s.free, models: s.models, sub: s.sub ? { ...s.sub, used: s.subUsed } : null, credit: s.credit };
+    async account(_d, _m, code): Promise<Account> {
+      const g: Grant | null = s.grant && code === s.grant.code ? { id: 1, who: s.grant.who, seconds: s.grant.seconds, used: s.grant.used } : null;
+      return { freeUsed: s.free, grant: g, models: s.models, sub: s.sub ? { ...s.sub, used: s.subUsed } : null, credit: s.credit };
     },
     async charge(_d, _m, bucket: Bucket, seconds) {
-      if (bucket === "free") s.free += seconds;
+      if (bucket === "grant") s.grant!.used += seconds;
+      else if (bucket === "free") s.free += seconds;
       else if (bucket === "sub") s.subUsed += seconds;
       else s.credit = Math.max(0, s.credit - seconds);
     },
+    async codeFor(email) { return s.grant && s.grant.who.toLowerCase() === email ? s.grant.code : null; },
     async saveSubscription(_d, sub) { s.sub = sub; },
     async addTopup(token, _d, seconds) {
       if (s.topups.has(token)) return false;
@@ -169,8 +174,8 @@ describe("transcription server", () => {
 
   it("doesn't let bought hours work without an active subscription", () => {
     const expired = { token: "t", product: "monthly", expiry: now.getTime() - 1, used: 0 };
-    expect(choose({ freeUsed: 1800, models: DEFAULT_MODELS, sub: expired, credit: 9999 }, now.getTime(), 1800)).toBeNull();
-    expect(choose({ freeUsed: 1800, models: DEFAULT_MODELS, sub: null, credit: 9999 }, now.getTime(), 1800)).toBeNull();
+    expect(choose({ freeUsed: 1800, grant: null, models: DEFAULT_MODELS, sub: expired, credit: 9999 }, now.getTime(), 1800)).toBeNull();
+    expect(choose({ freeUsed: 1800, grant: null, models: DEFAULT_MODELS, sub: null, credit: 9999 }, now.getTime(), 1800)).toBeNull();
   });
 
   it("doesn't count audio no model could type", async () => {
@@ -217,7 +222,7 @@ describe("transcription server", () => {
   it("reports usage", async () => {
     const res = await handle(new Request("https://example.com/v1/usage", { headers: { "X-Device-Id": device } }),
       env, memoryStore({ free: 90 }).store, now, ok);
-    expect(await res.json()).toEqual({ used_seconds: 90, free_seconds: 1800, month: "2026-11", subscribed: false, out: false });
+    expect(await res.json()).toEqual({ used_seconds: 90, free_seconds: 1800, month: "2026-11", subscribed: false, out: false, access: null });
   });
 
   it("checks a top-up with Google once and adds its hours once", async () => {
@@ -254,6 +259,121 @@ describe("transcription server", () => {
     }), { ...env, GOOGLE_SERVICE_ACCOUNT: sa }, store, now, google);
     expect(await res.json()).toEqual({ subscribed: true, out: false });
     expect(s.sub).toEqual({ token: "sub", product: "monthly", expiry: later });
+  });
+
+  describe("hours given on the Access page", () => {
+    const CODE = "K7QM4XPA9TRW";
+    const withCode = (c = "k7qm-4xpa-9trw") => ({ "X-Device-Id": device, "X-Access-Code": c });
+    const paidFetch = (sent: string[]) => (async (_u: string, init: RequestInit) => {
+      sent.push(JSON.parse(init.body as string).model);
+      return Response.json({ text: "hi", usage: { seconds: 10, cost: 10 * 0.1 / 3600 } });
+    }) as unknown as typeof fetch;
+    const models = { free: [{ id: "free-model", per_hour: 0.1 }], paid: [{ id: "paid-model", per_hour: 0.1 }] };
+
+    it("reads a code as typed, with dashes, spaces and any case", () => {
+      expect(accessCode(" k7qm-4xpa 9trw ")).toBe(CODE);
+      expect(accessCode("short")).toBeNull();
+      expect(accessCode(null)).toBeNull();
+    });
+
+    it("uses given hours first, past the free minutes, on the paid models, until they're used", async () => {
+      const sent: string[] = [];
+      const a = memoryStore({ free: 1800, models, grant: { code: CODE, who: "friend@gmail.com", seconds: 3600 } });
+      expect((await handle(transcribe(10, {}, withCode()), env, a.store, now, paidFetch(sent))).status).toBe(200);
+      expect(sent).toEqual(["paid-model"]);
+      expect(a.s.grant!.used).toBeCloseTo(10, 5);
+      expect(a.s.free).toBe(1800);
+      // Used up, free minutes too: refused with its own code.
+      const b = memoryStore({ free: 1800, grant: { code: CODE, who: "friend@gmail.com", seconds: 3600, used: 3600 } });
+      const res = await handle(transcribe(10, {}, withCode()), env, b.store, now, ok);
+      expect(res.status).toBe(402);
+      expect((await res.json() as { error: { code: string } }).error.code).toBe("given_hours_used");
+      // Used up with free minutes left: the free minutes go next.
+      const c = memoryStore({ free: 0, grant: { code: CODE, who: "friend@gmail.com", seconds: 3600, used: 3600 } });
+      expect((await handle(transcribe(10, {}, withCode()), env, c.store, now, ok)).status).toBe(200);
+      expect(c.s.free).toBeGreaterThan(0);
+    });
+
+    it("never refuses unlimited", async () => {
+      const a = memoryStore({ free: 1800, grant: { code: CODE, who: "me@gmail.com", seconds: null, used: 1e9 } });
+      expect((await handle(transcribe(10, {}, withCode()), env, a.store, now, ok)).status).toBe(200);
+    });
+
+    it("ignores a wrong or removed code", async () => {
+      const a = memoryStore({ free: 1800, grant: { code: CODE, who: "friend@gmail.com", seconds: null } });
+      expect((await handle(transcribe(10, {}, withCode("AAAABBBBCCCC")), env, a.store, now, ok)).status).toBe(402);
+      const usage = await handle(new Request("https://example.com/v1/usage", { headers: withCode("AAAABBBBCCCC") }), env, a.store, now, ok);
+      expect((await usage.json() as { access: unknown }).access).toBeNull();
+    });
+
+    it("reports the given hours on usage", async () => {
+      const a = memoryStore({ grant: { code: CODE, who: "friend@gmail.com", seconds: 7200, used: 60 } });
+      const usage = await handle(new Request("https://example.com/v1/usage", { headers: withCode() }), env, a.store, now, ok);
+      expect((await usage.json() as { access: unknown }).access).toEqual({ who: "friend@gmail.com", seconds: 7200, used_seconds: 60 });
+    });
+
+    it("lets a valid code stand in for the device token, and nothing else", async () => {
+      const strict = { ...env, REQUIRE_INTEGRITY: "true", DEVICE_TOKEN_SECRET: "s" } as Env;
+      const a = memoryStore({ grant: { code: CODE, who: "friend", seconds: null } });
+      expect((await handle(transcribe(5, {}, withCode()), strict, a.store, now, ok)).status).toBe(200);
+      expect((await handle(transcribe(5, {}, withCode("AAAABBBBCCCC")), strict, a.store, now, ok)).status).toBe(426);
+    });
+
+    it("lets a Yiddish take through with a code and no device token, counted twice on the given hours", async () => {
+      const e = { ...env, DEVICE_TOKEN_SECRET: "s" } as Env;
+      const a = memoryStore({ grant: { code: CODE, who: "friend", seconds: 3600 } });
+      expect(await yiddishCheck(e, a.store, device, null, now, "k7qm-4xpa-9trw")).toEqual({ ok: true });
+      await yiddishCharge(e, a.store, device, 30, now, CODE);
+      expect(a.s.grant!.used).toBe(60);
+      expect(a.s.free).toBe(0);
+      // Used up: without Google Play's word, the phone's free minutes don't count.
+      const b = memoryStore({ grant: { code: CODE, who: "friend", seconds: 3600, used: 3600 } });
+      expect(await yiddishCheck(e, b.store, device, null, now, CODE)).toMatchObject({ ok: false, status: 402, code: "given_hours_used" });
+      expect(await yiddishCheck(e, b.store, device, null, now, "AAAABBBBCCCC")).toMatchObject({ ok: false, status: 403 });
+    });
+
+    describe("Google sign-in", () => {
+      const CLIENT = "web-client.apps.googleusercontent.com";
+      async function signer() {
+        const { generateKeyPairSync, createSign } = await import("node:crypto");
+        const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+        const kid = Math.random().toString(36).slice(2);
+        const jwk = { ...publicKey.export({ format: "jwk" }), kid, alg: "RS256", use: "sig" };
+        const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
+        const token = (claims: Record<string, unknown>) => {
+          const unsigned = b64({ alg: "RS256", kid, typ: "JWT" }) + "." + b64(claims);
+          return unsigned + "." + createSign("RSA-SHA256").update(unsigned).sign(privateKey).toString("base64url");
+        };
+        const google = (async () => Response.json({ keys: [jwk] }, { headers: { "cache-control": "max-age=60" } })) as unknown as typeof fetch;
+        return { token, google };
+      }
+      const exp = Math.floor(now.getTime() / 1000) + 600;
+      const good = { iss: "https://accounts.google.com", aud: CLIENT, exp, email: "Friend@gmail.com", email_verified: true };
+      const signIn = (t: string) => new Request("https://example.com/v1/access/google", { method: "POST", body: JSON.stringify({ id_token: t }) });
+      const e = { ...env, GOOGLE_WEB_CLIENT_ID: CLIENT } as Env;
+
+      it("gives a signed-in person the code for hours given to their Google email", async () => {
+        const { token, google } = await signer();
+        const a = memoryStore({ grant: { code: CODE, who: "friend@gmail.com", seconds: null } });
+        const res = await handle(signIn(token(good)), e, a.store, now, google);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ code: CODE, who: "friend@gmail.com" });
+      });
+
+      it("refuses an email with no hours, a token for another app, an expired or unverified one, or a forged one", async () => {
+        const { token, google } = await signer();
+        const a = memoryStore({ grant: { code: CODE, who: "friend@gmail.com", seconds: null } });
+        const none = await handle(signIn(token({ ...good, email: "stranger@gmail.com" })), e, a.store, now, google);
+        expect(none.status).toBe(404);
+        expect((await none.json() as { error: { code: string } }).error.code).toBe("no_access");
+        for (const bad of [{ ...good, aud: "other" }, { ...good, exp: exp - 1200 }, { ...good, email_verified: false },
+          { ...good, iss: "evil" }]) {
+          expect((await handle(signIn(token(bad)), e, a.store, now, google)).status).toBe(403);
+        }
+        const forged = (await signer()).token(good);
+        expect((await handle(signIn(forged), e, a.store, now, google)).status).toBe(403);
+      });
+    });
   });
 
   describe("Play Integrity", () => {

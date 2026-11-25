@@ -32,13 +32,22 @@
  *   POST /v1/purchases       {"product_id", "purchase_token"}: a Google Play purchase to check
  *                            and count. Answers {"subscribed", "out"}.
  *
+ * Hours given without a subscription (Isaac, 2026-11-24: "Make me a way to give access, for people,
+ * without subscribing"): on yiddishvoicetotext.com, Access, Isaac gives a person any number of hours a
+ * month or unlimited (table grants). Each person has an access code. The GitHub builds take it typed in
+ * Settings; the Play app gets it by signing in with Google (POST /v1/access/google), so it goes by the
+ * Google email. Every call with the code (header X-Access-Code) uses those hours first, on every phone
+ * that has it. They reset each UTC month like the free minutes. A call with a valid code doesn't need a
+ * device token, since GitHub builds can't get one; the code is the proof.
+ *   POST /v1/access/google   {"id_token"}: a Google ID token. Answers {"code", "who"}, or 404 code no_access.
+ *
  * The Worker in front of the Yiddish model asks this server before each of the app's Yiddish takes
  * and counts the take afterwards, through the RPC entrypoint in worker.ts (yiddishCheck and
  * yiddishCharge below), which isn't on the internet.
  */
 
-import { decodeIntegrity, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
-import { d1Store, type Account, type Bucket, type ModelChoice, type Store } from "./store";
+import { decodeIntegrity, googleEmail, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
+import { d1Store, type Account, type Bucket, type Grant, type ModelChoice, type Store } from "./store";
 
 export interface Env {
   DB: D1Database;
@@ -50,6 +59,8 @@ export interface Env {
   DEVICE_TOKEN_SECRET?: string;
   /** "true" once every call must carry a device token from /v1/register. */
   REQUIRE_INTEGRITY?: string;
+  /** The OAuth web client ID the Play app's "Sign in with Google" asks ID tokens for. */
+  GOOGLE_WEB_CLIENT_ID?: string;
 }
 
 /** The Play products (Play Console, Monetize). */
@@ -110,13 +121,30 @@ export function planSeconds(responseText: string, base64: string, format: string
   return audioSeconds(responseText, base64, format) * Math.max(1, (model.per_hour ?? base) / base);
 }
 
+/** True while a grant has time left this month (unlimited always does). */
+export function grantLeft(g: Grant | null): boolean {
+  return !!g && (g.seconds == null || g.used < g.seconds);
+}
+
 /**
- * What pays for the next recording: this month's free minutes first, then the subscription's
+ * An access code as typed: letters and digits only, any case, dashes and spaces ignored. Null when it
+ * can't be one (codes are 12 letters and digits, made by the Access page).
+ */
+export function accessCode(raw: string | null | undefined): string | null {
+  const c = String(raw ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return c.length === 12 ? c : null;
+}
+
+/**
+ * What pays for the next recording: hours given on the Access page first (so a gift never uses up
+ * the free minutes or paid hours), then this month's free minutes, then the subscription's
  * hours, then bought hours (only while subscribed). Paying phones get the paid models even on
  * free minutes. Null when nothing is left.
  */
 export function choose(a: Account, now: number, free: number): { bucket: Bucket; paid: boolean } | null {
   const subscribed = !!a.sub && a.sub.expiry > now;
+  // Given hours get the paid models and count like paid hours.
+  if (grantLeft(a.grant)) return { bucket: "grant", paid: true };
   if (a.freeUsed < free) return { bucket: "free", paid: subscribed };
   if (!subscribed) return null;
   if (a.sub!.used < SUB_SECONDS) return { bucket: "sub", paid: true };
@@ -130,9 +158,9 @@ function error(status: number, message: string, code?: string): Response {
 
 /** The answer when nothing is left. The app shows its own message for each code. */
 function outOfTime(a: Account, now: number, free: number): Response {
-  return a.sub && a.sub.expiry > now
-    ? error(402, "You've used this month's hours.", "hours_used")
-    : error(402, "You've used your " + Math.round(free / 60) + " free minutes this month.", "free_minutes_used");
+  if (a.sub && a.sub.expiry > now) return error(402, "You've used this month's hours.", "hours_used");
+  if (a.grant) return error(402, "You've used this month's hours. They start again on the 1st.", "given_hours_used");
+  return error(402, "You've used your " + Math.round(free / 60) + " free minutes this month.", "free_minutes_used");
 }
 
 /** A device ID is the app's hashed Android ID: 64 hex characters. */
@@ -226,16 +254,38 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     return Response.json({ device_token: await deviceToken(env.DEVICE_TOKEN_SECRET, device) });
   }
 
-  if (device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)) {
+  if (url.pathname === "/v1/access/google" && request.method === "POST") {
+    if (!env.GOOGLE_WEB_CLIENT_ID) return error(503, "Google sign-in isn't set up yet.");
+    const { id_token: idToken } = await request.json().catch(() => ({})) as { id_token?: unknown };
+    if (typeof idToken !== "string" || !idToken) return error(400, "Missing ID token.");
+    let email: string | null;
+    try {
+      email = await googleEmail(idToken, env.GOOGLE_WEB_CLIENT_ID, fetcher, now.getTime());
+    } catch {
+      return error(503, "Google didn't answer. Try again.");
+    }
+    if (!email) return error(403, "Google couldn't confirm this account. Try again.", "google_unverified");
+    const found = await store.codeFor(email);
+    if (!found) return error(404, "No hours were given to " + email + ".", "no_access");
+    return Response.json({ code: found, who: email });
+  }
+
+  const code = accessCode(request.headers.get("X-Access-Code"));
+  // Loaded before the device check: a valid access code stands in for a device token.
+  const account = device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)
+    ? await store.account(device, month, code) : null;
+  if (device && account && !account.grant) {
     const refused = await unverified(request, env, device);
     if (refused) return refused;
   }
 
   if (url.pathname === "/v1/usage" && request.method === "GET") {
-    if (!device) return error(400, "Missing device ID.");
-    const a = await store.account(device, month);
+    if (!device || !account) return error(400, "Missing device ID.");
+    const a = account, g = a.grant;
     return Response.json({ used_seconds: a.freeUsed, free_seconds: free, month,
-      subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !choose(a, now.getTime(), free) });
+      subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !choose(a, now.getTime(), free),
+      // The hours given to this code; null when the call had no code or the code was removed.
+      access: g ? { who: g.who, seconds: g.seconds, used_seconds: g.used } : null });
   }
 
   if (url.pathname === "/v1/purchases" && request.method === "POST") {
@@ -255,7 +305,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     if (!v) return error(402, "Google Play doesn't show this purchase as paid.", "not_paid");
     if (v.kind === "subscription") await store.saveSubscription(device, { token, product: v.product, expiry: v.expiry });
     else await store.addTopup(token, device, TOPUP_SECONDS, now.getTime());
-    const a = await store.account(device, month);
+    const a = await store.account(device, month, code);
     return Response.json({ subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !choose(a, now.getTime(), free) });
   }
 
@@ -272,7 +322,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   if (typeof audio !== "string" || audio.length === 0) return error(400, "No audio in the request.");
   const format = typeof body.input_audio?.format === "string" ? body.input_audio.format : "wav";
 
-  const a = await store.account(device, month);
+  const a = account ?? await store.account(device, month, code);
   const pick = choose(a, now.getTime(), free);
   if (!pick) return outOfTime(a, now.getTime(), free);
 
@@ -303,7 +353,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   // Only audio that came back as text counts. The count is saved after the answer goes back.
   if (status >= 200 && status < 300 && used) {
     await later(store.charge(device, month, pick.bucket, planSeconds(text, audio, format, used,
-      pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR), a.sub));
+      pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR), a.sub, a.grant));
   }
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
 }
@@ -318,34 +368,37 @@ export type CheckAnswer = { ok: true } | { ok: false; status: number; code: stri
  * everyone to be able to do that"). The model doesn't run on the person's OpenRouter key, so a
  * typed key changes nothing: every take needs a phone Google Play vouched for (a device token,
  * whatever REQUIRE_INTEGRITY says) with time left in the same free minutes and hours as
- * everything else. Builds not from Google Play never get a token, so they never get Yiddish.
+ * everything else. Builds not from Google Play never get a token, so they get Yiddish only with an
+ * access code ([rawCode], from the Access page), which also stands in for the token.
  */
 export async function yiddishCheck(env: Env, store: Store, device: unknown, token: unknown,
-                                   now = new Date()): Promise<CheckAnswer> {
+                                   now = new Date(), rawCode: unknown = null): Promise<CheckAnswer> {
   if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) {
     return { ok: false, status: 400, code: "no_device", message: "Missing device ID." };
   }
-  if (typeof token !== "string" || !env.DEVICE_TOKEN_SECRET || !await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token)) {
+  const free = Number(env.FREE_SECONDS_PER_MONTH);
+  const a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null));
+  const vouched = typeof token === "string" && !!env.DEVICE_TOKEN_SECRET && await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token);
+  if (!vouched && !a.grant) {
     return { ok: false, status: 403, code: "device_unverified", message: "Google Play couldn't confirm this phone." };
   }
-  const free = Number(env.FREE_SECONDS_PER_MONTH);
-  const a = await store.account(device, monthOf(now));
-  if (choose(a, now.getTime(), free)) return { ok: true };
+  // Without Google Play's word for the phone, only the given hours count, not its free minutes.
+  if (vouched ? choose(a, now.getTime(), free) : grantLeft(a.grant)) return { ok: true };
   const out = await outOfTime(a, now.getTime(), free).json() as { error: { message: string; code: string } };
   return { ok: false, status: 402, code: out.error.code, message: out.error.message };
 }
 
 /** Counts [seconds] of audio the Yiddish model typed, at YIDDISH_WEIGHT, on whatever pays next. */
 export async function yiddishCharge(env: Env, store: Store, device: unknown, seconds: unknown,
-                                    now = new Date()): Promise<void> {
+                                    now = new Date(), rawCode: unknown = null): Promise<void> {
   if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) return;
   if (typeof seconds !== "number" || !(seconds > 0)) return;
   const month = monthOf(now);
-  const a = await store.account(device, month);
+  const a = await store.account(device, month, accessCode(typeof rawCode === "string" ? rawCode : null));
   const pick = choose(a, now.getTime(), Number(env.FREE_SECONDS_PER_MONTH));
   // Nothing left now: the take was allowed when it started, so it still counts.
-  const bucket = pick?.bucket ?? (a.sub && a.sub.expiry > now.getTime() ? "sub" : "free");
-  await store.charge(device, month, bucket, seconds * YIDDISH_WEIGHT, a.sub);
+  const bucket = pick?.bucket ?? (a.grant ? "grant" : a.sub && a.sub.expiry > now.getTime() ? "sub" : "free");
+  await store.charge(device, month, bucket, seconds * YIDDISH_WEIGHT, a.sub, a.grant);
 }
 
 export default {
