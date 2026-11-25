@@ -177,6 +177,26 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   once a day, after the answer has gone back (Google lists refunded, canceled and charged-back one-time
   purchases there for 30 days; one answer covers every phone). Needs two new `topups` columns in D1
   before the deploy (`schema.sql`); without them only this check fails, in the Worker log.
+- Security and money review of the whole server (2026-11-25, not deployed yet). `server/test/local.test.ts`
+  attacks a local run (`test/local-run.ts`: the bundled Worker in Miniflare with a local D1 from `schema.sql`;
+  every outside call goes to stand-ins, so no test can reach Google or OpenRouter). Fixed, each failing first:
+  time was only checked before a recording and counted after it, so many recordings at once on a phone's, a
+  code's or a subscription's last second were all typed; now each holds its estimated length first in one
+  conditional statement (`Store.reserve`) and OpenRouter's measured length replaces it afterwards. The phone's
+  whole body went to OpenRouter on the server's key (provider routing, paid extras, a download link); now only
+  the audio, its format (ogg or wav), language and the app's verbatim switches. A failed write could leave a
+  bought top-up counted without its hours; now one transaction. A refund older than Google's 30-day list
+  kept its hours; now old top-ups are asked about one by one. Optional, off until Isaac sets them:
+  `OPENROUTER_PAID_KEY` (a second key with its own limit for phones that pay, so free or given use reaching
+  the main key's limit can't stop subscribers), `MAX_RECORDING_SECONDS`, and the rate limits `DEVICE_LIMITER`
+  and `ADDRESS_LIMITER` (commented in `wrangler.jsonc`). Still open: the Yiddish entrypoint is checked once
+  before a take and counted after it, so many takes at once pass on the last second (an `it.fails` test
+  shows it; the fix needs the yiddishtry Worker to hold and settle too); one rooted phone with the real Play
+  app can have Play Integrity vouch for any number of made-up device IDs, each with free minutes, since
+  basic integrity is enough (Google's optional recent device activity and device recall verdicts are the
+  documented answers); anyone can call `/v1/register`, and each call with a token makes one Play Integrity
+  decode, whose quota is 10,000 a day for the whole app; device tokens and subscription purchase tokens work
+  on any phone that has them, and a code is shared by design.
 
 ## Paid plan (agreed with Isaac 2026-11-20, built the same day)
 

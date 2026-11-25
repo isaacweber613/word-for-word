@@ -67,6 +67,8 @@ export interface LocalServer {
   calls: Call[];
   /** A request to the server, as the app sends it. */
   fetch(path: string, init?: { method?: string; headers?: Record<string, string>; body?: unknown }): Promise<Response>;
+  /** The Yiddish entrypoint (worker.ts), called the way the yiddishtry Worker calls it through its service binding. */
+  yiddish(method: "check" | "charge", ...args: unknown[]): Promise<unknown>;
   /** Empties every table and the list of calls, and puts the stand-ins back to their defaults. */
   reset(): Promise<void>;
   /** Waits for work the Worker does after answering (ctx.waitUntil) until [check] is true. */
@@ -87,7 +89,7 @@ export async function startLocal(vars: Record<string, string> = {}, extra: Recor
   const calls: Call[] = [];
   const stand: StandIns = quiet();
   // Miniflare 5 takes its own options shape; convertV4MiniflareOptions reads the documented one.
-  const mf = new Miniflare(convertV4MiniflareOptions({
+  const mf = new Miniflare(convertV4MiniflareOptions({ workers: [{
     name: "word-for-word",
     modules: true,
     // As text: given as a file path, workerd on Windows fails to start it ("internal error").
@@ -122,7 +124,15 @@ export async function startLocal(vars: Record<string, string> = {}, extra: Recor
       // Miniflare wants its own Response class back.
       return new MfResponse(await answer.text(), { status: answer.status, headers: Object.fromEntries(answer.headers) });
     },
-  } as Parameters<typeof convertV4MiniflareOptions>[0]));
+  }, {
+    // Stands in for the yiddishtry Worker (yiddish-stt tryout/worker), which reaches the entrypoint by service binding.
+    name: "yiddish-caller",
+    modules: true,
+    compatibilityDate: "2026-11-01",
+    serviceBindings: { WFW: { name: "word-for-word", entrypoint: "Yiddish" } },
+    script: "export default { async fetch(request, env) { const { method, args } = await request.json(); " +
+      "return Response.json((await env.WFW[method](...args)) ?? null); } }",
+  }] } as Parameters<typeof convertV4MiniflareOptions>[0]));
   const db = await mf.getD1Database("DB") as unknown as D1Database;
   for (const s of schemaStatements()) await db.prepare(s).run();
   return {
@@ -134,6 +144,11 @@ export async function startLocal(vars: Record<string, string> = {}, extra: Recor
       });
       // Back to Node's own Response, so tests read it like any other.
       return new Response(await res.text(), { status: res.status, headers: Object.fromEntries(res.headers) });
+    },
+    async yiddish(method, ...args) {
+      const caller = await mf.getWorker("yiddish-caller");
+      const res = await caller.fetch("https://yiddish-caller.local/", { method: "POST", body: JSON.stringify({ method, args }) });
+      return res.json();
     },
     async reset() {
       for (const t of TABLES) await db.prepare("DELETE FROM " + t).run();

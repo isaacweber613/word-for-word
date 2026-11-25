@@ -4,7 +4,7 @@
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { d1Store } from "../src/store";
-import { deviceId, phone, recording, startLocal, type LocalServer } from "./local-run";
+import { deviceId, deviceToken, phone, recording, startLocal, type LocalServer } from "./local-run";
 
 const month = () => new Date().toISOString().slice(0, 7);
 const DAY = 24 * 3600_000;
@@ -55,6 +55,16 @@ describe("a local run of the server", () => {
         { method: "POST", headers: phone(deviceId(100 + i), { token: false, code: "K7QM-4XPA-9TRW" }), body: recording(60) })), release);
       expect(openrouterCalls()).toHaveLength(1);
       expect(statuses).toEqual([200, 402, 402, 402, 402]);
+    });
+
+    // Not fixed by this server alone: the yiddishtry Worker (yiddish-stt tryout/worker) asks check once before a take
+    // and calls charge after it, and has no way to hold time and give it back. This test fails, as it.fails expects,
+    // until that Worker holds and settles each take the way recordings now do.
+    it.fails("can't start many Yiddish takes on the last second of a phone's free minutes", async () => {
+      const d = deviceId(30);
+      await server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, 1799)").bind(d, month()).run();
+      const answers = await Promise.all(Array.from({ length: 5 }, () => server.yiddish("check", d, deviceToken(d), null)));
+      expect(answers.filter((x) => (x as { ok: boolean }).ok)).toHaveLength(1);
     });
 
     it("gives back what a recording held when no model typed it", async () => {
