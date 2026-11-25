@@ -107,8 +107,30 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun setDictationTarget(node: AccessibilityNodeInfo?) {
         dictationTarget?.recycle()
         dictationTarget = node
-        dictationBox = node?.let { boxId(it) }
+        dictationBox = node?.let { boxId(it, if (it.viewIdResourceName == null) orderOf(it) else null) }
         screenRemade = false
+    }
+
+    /** The text boxes under [root], from the top of its tree down. */
+    private fun textBoxes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        val boxes = mutableListOf<AccessibilityNodeInfo>()
+        fun walk(node: AccessibilityNodeInfo) {
+            if (node.isEditable || node.className?.toString()?.contains("EditText") == true) boxes.add(AccessibilityNodeInfo.obtain(node))
+            for (i in 0 until node.childCount) node.getChild(i)?.let { walk(it); it.recycle() }
+        }
+        walk(root)
+        return boxes
+    }
+
+    /** Which text box [node] is in the active window ([BoxId.order]), or null. */
+    private fun orderOf(node: AccessibilityNodeInfo): Int? = try {
+        rootInActiveWindow?.let { root ->
+            val boxes = textBoxes(root)
+            root.recycle()
+            boxes.indexOf(node).takeIf { it >= 0 }.also { boxes.forEach { it.recycle() } }
+        }
+    } catch (_: Exception) {
+        null
     }
 
     override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
@@ -117,13 +139,13 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     /** [node]'s app, view ID, place in its window and window title (see [BoxId]). */
-    private fun boxId(node: AccessibilityNodeInfo): BoxId {
+    private fun boxId(node: AccessibilityNodeInfo, order: Int? = null): BoxId {
         val window = try {
             if (android.os.Build.VERSION.SDK_INT >= 24) node.window?.let { w -> w.title?.toString().also { w.recycle() } } else null
         } catch (_: Exception) {
             null
         }
-        return BoxId(node.packageName?.toString(), node.viewIdResourceName, pathOf(node), window)
+        return BoxId(node.packageName?.toString(), node.viewIdResourceName, pathOf(node), window, node.windowId.takeIf { it >= 0 }, order)
     }
 
     /** The child number at each level from the window's top down to [node], or null when Android doesn't say. */
@@ -152,18 +174,6 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
-    /** The node at [path] under [root] (see [pathOf]), or null. */
-    private fun nodeAt(root: AccessibilityNodeInfo, path: List<Int>?): AccessibilityNodeInfo? {
-        if (path == null) return null
-        var node = AccessibilityNodeInfo.obtain(root)
-        for (i in path) {
-            val child = if (i < node.childCount) node.getChild(i) else null
-            node.recycle()
-            node = child ?: return null
-        }
-        return node
-    }
-
     /**
      * The box [old] made again in the active window after Android made the screen anew, or null. Never
      * another box, such as another chat's message box with the same view ID: see [SameBox.find].
@@ -173,10 +183,12 @@ class WhisperAccessibilityService : AccessibilityService() {
         val root = rootInActiveWindow ?: return null
         return try {
             if (root.packageName?.toString() != old.app) return null
-            val found = if (old.viewId != null) root.findAccessibilityNodeInfosByViewId(old.viewId)
-                        else listOfNotNull(nodeAt(root, old.path))
+            // A box without a view ID is looked for among every text box, as the same numbered one (BoxId.order).
+            val found = if (old.viewId != null) root.findAccessibilityNodeInfosByViewId(old.viewId) else textBoxes(root)
             val boxes = found.filter { it.isEditable || it.className?.toString()?.contains("EditText") == true }
-            val pick = SameBox.find(old, boxes.map { boxId(it) }, screenRemade)?.let { boxes[it] }
+            val seen = boxes.mapIndexed { i, box -> boxId(box, if (old.viewId == null) i else null) }
+            Log.i(TAG, "Looking for the box made anew: window ${old.windowId}, boxes in windows ${seen.map { it.windowId }}")
+            val pick = SameBox.find(old, seen, screenRemade)?.let { boxes[it] }
             found.forEach { if (it !== pick) it.recycle() }
             pick
         } catch (_: Exception) {

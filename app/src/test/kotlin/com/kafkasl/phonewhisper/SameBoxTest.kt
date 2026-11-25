@@ -44,4 +44,28 @@ class SameBoxTest {
         assertEquals(1, SameBox.find(row, listOf(other, row), remade = true))
         assertNull(SameBox.find(row, listOf(other, other.copy(path = listOf(0, 5, 3, 1))), remade = true))
     }
+
+    @Test fun anotherChatsBoxInTheSameWindowAfterTheTurn() {
+        // Google Messages keeps its window through the turn; opening another chat then swaps in that chat's
+        // box, with the same ID, in the same window. It is another chat, never the box made again.
+        val chat = BoxId("com.google.android.apps.messaging", "com.google.android.apps.messaging:id/compose_message_text",
+            listOf(0, 0, 3), "Messages", windowId = 41)
+        assertNull(SameBox.find(chat, listOf(chat), remade = true))
+        // An app that makes its screen anew for the turn shows the box in a new window.
+        assertEquals(0, SameBox.find(chat, listOf(chat.copy(windowId = 57)), remade = true))
+        // A window number Android didn't give doesn't count against it.
+        assertEquals(0, SameBox.find(chat.copy(windowId = null), listOf(chat), remade = true))
+    }
+
+    @Test fun aBoxWithoutAnIdAsTheSameNumberedBoxWhenTheLayoutMoves() {
+        // Google Contacts' new-contact form: turned, the photo goes beside the boxes, so "Company" (the third
+        // text box, no view ID) sits elsewhere in the tree, in the activity's new window.
+        val company = BoxId("com.google.android.contacts", null, listOf(0, 0, 1, 4, 0), "Contacts", windowId = 50, order = 2)
+        val turned = listOf(0, 1, 2).map { company.copy(path = listOf(0, 1, 0, it, 0), windowId = 61, order = it) }
+        assertEquals(2, SameBox.find(company, turned, remade = true))
+        // The same number in the same window is another box the app put there, never the box made again.
+        assertNull(SameBox.find(company, listOf(company.copy(windowId = 50)), remade = true))
+        // The same place but another number is another box.
+        assertNull(SameBox.find(company, listOf(company.copy(windowId = 61, order = 1)), remade = true))
+    }
 }
