@@ -64,6 +64,16 @@ export interface Store {
   saveSubscription(device: string, sub: Sub): Promise<void>;
   /** Adds a bought top-up once. False when this purchase was already counted. */
   addTopup(token: string, device: string, seconds: number, now: number): Promise<boolean>;
+  /**
+   * When Google was last asked whether this phone's counted top-ups were refunded (the oldest of them;
+   * one never asked about counts from when it was bought), or null when it has none.
+   */
+  topupsChecked(device: string): Promise<number | null>;
+  /**
+   * Takes back what is left of each voided top-up's hours from its phone, never below zero, once per
+   * top-up; every top-up still counted is then checked as of [now]. Answers how many were taken back.
+   */
+  takeBackTopups(voided: string[], now: number): Promise<number>;
   /** Saves a failed check on the Failed checks list, counting each report. */
   failedCheck(device: string, report: FailedCheck, now: number): Promise<void>;
   /** The phone passed: it leaves the list, unless Isaac gave it hours. */
@@ -138,6 +148,23 @@ export function d1Store(db: D1Database): Store {
       await db.prepare("INSERT INTO credit (device, seconds) VALUES (?, ?) " +
         "ON CONFLICT (device) DO UPDATE SET seconds = seconds + excluded.seconds").bind(device, seconds).run();
       return true;
+    },
+    async topupsChecked(device) {
+      const row = await db.prepare("SELECT min(coalesce(checked, created_at)) AS at FROM topups WHERE device = ? AND voided IS NULL")
+        .bind(device).first<{ at: number | null }>();
+      return row?.at ?? null;
+    },
+    async takeBackTopups(voided, now) {
+      // One transaction: a top-up already taken back, or one this server never counted, changes nothing.
+      const results = await db.batch([
+        ...voided.flatMap((token) => [
+          db.prepare("UPDATE credit SET seconds = max(0, seconds - (SELECT seconds FROM topups WHERE token = ? AND voided IS NULL)) " +
+            "WHERE device = (SELECT device FROM topups WHERE token = ? AND voided IS NULL)").bind(token, token),
+          db.prepare("UPDATE topups SET voided = ? WHERE token = ? AND voided IS NULL").bind(now, token),
+        ]),
+        db.prepare("UPDATE topups SET checked = ? WHERE voided IS NULL").bind(now),
+      ]);
+      return results.filter((_, i) => i % 2 === 1 && i < voided.length * 2).reduce((n, r) => n + (r.meta.changes ?? 0), 0);
     },
     async failedCheck(device, r, now) {
       await db.prepare("INSERT INTO failed_checks (device, model, android, app_version, reason, first_seen, last_seen, count) " +

@@ -12,10 +12,14 @@ const later = now.getTime() + 20 * 86400_000;
 
 /** The D1 store in memory. */
 function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | null; subUsed: number; credit: number;
-                                    grant: { code: string; who: string; seconds: number | null; used?: number; device?: string } }> = {}) {
+                                    grant: { code: string; who: string; seconds: number | null; used?: number; device?: string };
+                                    topups: { token: string; seconds: number; created: number }[] }> = {}) {
   const s = {
     free: init.free ?? 0, models: init.models ?? DEFAULT_MODELS, sub: init.sub ?? null,
-    subUsed: init.subUsed ?? 0, credit: init.credit ?? 0, topups: new Set<string>(),
+    subUsed: init.subUsed ?? 0, credit: init.credit ?? 0,
+    // Counted top-ups (table topups): their hours, when counted, last checked for a refund, refunded.
+    topups: new Map((init.topups ?? []).map((t) => [t.token,
+      { seconds: t.seconds, created: t.created, checked: null as number | null, voided: null as number | null }])),
     grant: init.grant ? { used: 0, ...init.grant } : null,
     // Plan seconds per paid month (subscription_usage), keyed like the D1 store.
     usage: new Map<number, number>(init.sub ? [[init.sub.period ?? init.sub.expiry, init.subUsed ?? 0]] : []),
@@ -35,9 +39,25 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
       else s.credit = Math.max(0, s.credit - seconds);
     },
     async saveSubscription(_d, sub) { s.sub = { ...sub, period: usagePeriod(s.sub?.token === sub.token ? s.sub : null, sub) }; },
-    async addTopup(token, _d, seconds) {
+    async addTopup(token, _d, seconds, at) {
       if (s.topups.has(token)) return false;
-      s.topups.add(token); s.credit += seconds; return true;
+      s.topups.set(token, { seconds, created: at, checked: null, voided: null }); s.credit += seconds; return true;
+    },
+    async topupsChecked() {
+      const counted = [...s.topups.values()].filter((t) => t.voided == null);
+      return counted.length ? Math.min(...counted.map((t) => t.checked ?? t.created)) : null;
+    },
+    async takeBackTopups(voided, at) {
+      let taken = 0;
+      for (const token of voided) {
+        const t = s.topups.get(token);
+        if (!t || t.voided != null) continue;
+        s.credit = Math.max(0, s.credit - t.seconds);
+        t.voided = at;
+        taken++;
+      }
+      for (const t of s.topups.values()) if (t.voided == null) t.checked = at;
+      return taken;
     },
     async failedCheck(d, r) { s.failed.set(d, { ...r, count: (s.failed.get(d)?.count ?? 0) + 1 }); },
     async passedCheck(d) { if (s.grant?.device !== d) s.failed.delete(d); },
@@ -464,6 +484,89 @@ describe("transcription server", () => {
       const e = { ...g.e, DEVICE_TOKEN_SECRET: "secret" };
       const { store } = memoryStore({ free: 1800, sub: lapsed });
       expect(await yiddishCheck(e, store, device, await deviceToken("secret", device), now, null, g.fetcher)).toEqual({ ok: true });
+    });
+  });
+
+  describe("a refunded top-up", () => {
+    /** Google's Play API listing [voided] as refunded one-time purchases (or failing with [status]). */
+    async function googleVoided(voided: string[], status = 200) {
+      const g = await googleSays("ACTIVE", later);
+      const asked: string[] = [];
+      const fetcher = (async (u: string, init?: RequestInit) => {
+        if (!u.includes("/purchases/voidedpurchases")) return g.fetcher(u, init);
+        asked.push(u);
+        if (status !== 200) return new Response("busy", { status });
+        return Response.json({ voidedPurchases: voided.map((purchaseToken) => ({ kind: "androidpublisher#voidedPurchase", purchaseToken })) });
+      }) as unknown as typeof fetch;
+      return { e: g.e, fetcher, asked };
+    }
+    // Subscribed, this month's 10 hours used: the bought hours pay next.
+    const paying = { free: 1800, sub: { token: "sub", product: "monthly", expiry: later, state: "ACTIVE", checked: now.getTime() },
+      subUsed: SUB_SECONDS };
+    const bought = (token: string, ago = DAY) => ({ token, seconds: TOPUP_SECONDS, created: now.getTime() - ago });
+
+    it("takes back the hours not used yet, never below zero, without slowing the call", async () => {
+      const g = await googleVoided(["tok"]);
+      // 4 hours bought, 1 used, then refunded.
+      const { s, store } = memoryStore({ ...paying, credit: TOPUP_SECONDS - 3600, topups: [bought("tok")] });
+      const deferred: Promise<unknown>[] = [];
+      const first = await handle(transcribe(10), g.e, store, now, g.fetcher, (p) => { deferred.push(p); });
+      expect(first.status).toBe(200); // served on what was known; Google is asked after the answer
+      await Promise.all(deferred);
+      expect(g.asked).toHaveLength(1);
+      expect(g.asked[0]).toContain("/applications/com.isaacweber.wordforword/purchases/voidedpurchases");
+      expect(s.credit).toBe(0);
+      expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(402);
+    });
+
+    it("keeps the hours of a top-up that wasn't refunded", async () => {
+      const g = await googleVoided(["two"]);
+      const { s, store } = memoryStore({ ...paying, credit: 2 * TOPUP_SECONDS - 3600, topups: [bought("one"), bought("two")] });
+      await handle(new Request("https://example.com/v1/usage", { headers: { "X-Device-Id": device } }), g.e, store, now, g.fetcher);
+      expect(s.credit).toBe(TOPUP_SECONDS - 3600);
+    });
+
+    it("asks once a day, and takes back each refund once although Google lists it for 30 days", async () => {
+      const g = await googleVoided(["one"]);
+      const { s, store } = memoryStore({ ...paying, credit: 2 * TOPUP_SECONDS, topups: [bought("one", DAY - 60_000), bought("two", DAY - 60_000)] });
+      await handle(transcribe(10), g.e, store, now, g.fetcher);
+      expect(g.asked).toHaveLength(0); // counted less than a day ago
+      await handle(transcribe(10), g.e, store, new Date(now.getTime() + 60_000), g.fetcher);
+      expect(g.asked).toHaveLength(1);
+      const left = s.credit;
+      expect(left).toBeLessThanOrEqual(TOPUP_SECONDS);
+      await handle(transcribe(10), g.e, store, new Date(now.getTime() + 2 * 60_000), g.fetcher);
+      expect(g.asked).toHaveLength(1);
+      await handle(new Request("https://example.com/v1/usage", { headers: { "X-Device-Id": device } }), g.e, store,
+        new Date(now.getTime() + 60_000 + DAY), g.fetcher);
+      expect(g.asked).toHaveLength(2);
+      expect(s.credit).toBeGreaterThan(left - 60); // only the two recordings since, not 4 more hours
+    });
+
+    it("tries again on the next call when Google doesn't answer", async () => {
+      const down = await googleVoided([], 503);
+      const { s, store } = memoryStore({ ...paying, credit: TOPUP_SECONDS, topups: [bought("tok")] });
+      await handle(new Request("https://example.com/v1/usage", { headers: { "X-Device-Id": device } }), down.e, store, now, down.fetcher);
+      expect(s.credit).toBe(TOPUP_SECONDS);
+      const up = await googleVoided(["tok"]);
+      await handle(new Request("https://example.com/v1/usage", { headers: { "X-Device-Id": device } }), up.e, store, now, up.fetcher);
+      expect(up.asked).toHaveLength(1);
+      expect(s.credit).toBe(0);
+    });
+
+    it("doesn't ask Google without bought hours left", async () => {
+      const g = await googleVoided(["tok"]);
+      const { store } = memoryStore({ ...paying, credit: 0, topups: [bought("tok")] });
+      await handle(transcribe(10), g.e, store, now, g.fetcher);
+      expect(g.asked).toHaveLength(0);
+    });
+
+    it("checks before a Yiddish take too", async () => {
+      const g = await googleVoided(["tok"]);
+      const e = { ...g.e, DEVICE_TOKEN_SECRET: "secret" };
+      const { s, store } = memoryStore({ ...paying, credit: TOPUP_SECONDS, topups: [bought("tok")] });
+      await yiddishCheck(e, store, device, await deviceToken("secret", device), now, null, g.fetcher);
+      expect(s.credit).toBe(0);
     });
   });
 

@@ -57,7 +57,12 @@ CREATE TABLE IF NOT EXISTS topups (
   token TEXT PRIMARY KEY,
   device TEXT NOT NULL,
   seconds REAL NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  -- When Google was last asked whether it was refunded (ms; NULL: not since it was counted), and when it was
+  -- found refunded and what was left of its hours taken back (ms; NULL: not refunded). Added 2026-11-25:
+  -- ALTER TABLE topups ADD COLUMN checked INTEGER; ALTER TABLE topups ADD COLUMN voided INTEGER.
+  checked INTEGER,
+  voided INTEGER
 );
 
 -- People Isaac gives hours to without a subscription (yiddishvoicetotext.com, Access tab; that site's

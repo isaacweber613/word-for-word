@@ -53,7 +53,7 @@
  * yiddishCharge below), which isn't on the internet.
  */
 
-import { decodeIntegrity, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
+import { decodeIntegrity, PACKAGE, verify, voidedPurchases, type IntegrityPayload, type Verified } from "./google";
 import { d1Store, usagePeriod, type Account, type Bucket, type Grant, type ModelChoice, type Store, type Sub } from "./store";
 
 export interface Env {
@@ -242,6 +242,27 @@ export async function refreshed(a: Account, env: Env, store: Store, device: stri
 }
 
 /**
+ * Takes back what is left of a refunded top-up's hours, never below zero (review, 2026-11-25: a refunded,
+ * canceled or charged-back top-up kept its 4 hours, since nothing asked Google about it after it was
+ * counted). Google lists such purchases in its Voided Purchases API for 30 days (voidedPurchases).
+ * While [a] has bought hours left, it is asked at most once a day, after the answer went back, the same
+ * as a paid subscription's refund check (recheckDue), so the call is no slower and a refund counts from
+ * a later call. One answer covers every phone's top-ups.
+ */
+export async function takeBackRefunds(a: Account, env: Env, store: Store, device: string, now: number,
+                                      fetcher: typeof fetch, defer?: (work: Promise<unknown>) => unknown): Promise<void> {
+  const serviceAccount = env.GOOGLE_SERVICE_ACCOUNT;
+  if (!serviceAccount || !(a.credit > 0)) return;
+  const work = (async () => {
+    const checked = await store.topupsChecked(device);
+    if (checked == null || now - checked < SILENT_GRACE_MS) return;
+    const taken = await store.takeBackTopups(await voidedPurchases(serviceAccount, fetcher, now), now);
+    if (taken) console.log("Refunded top-ups, hours left taken back:", taken);
+  })().catch((e) => console.error("Top-up refund check failed:", e));
+  if (defer) await defer(work); else await work;
+}
+
+/**
  * What pays for the next recording: hours given on the Access page first (so a gift never uses up
  * the free minutes or paid hours), then this month's free minutes, then the subscription's
  * hours, then bought hours (only while subscribed). Paying phones get the paid models even on
@@ -394,9 +415,12 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     const refused = await unverified(request, env, device);
     if (refused && !account.grant) return refused;
     grantOnly = !!refused;
-    // A lapsed subscription may have renewed since, and a paid one may have been refunded. Not for
-    // /v1/purchases, which asks Google itself.
-    if (!grantOnly && url.pathname !== "/v1/purchases") account = await refreshed(account, env, store, device, now.getTime(), fetcher, later);
+    // A lapsed subscription may have renewed since, and a paid one or a top-up may have been refunded.
+    // Not for /v1/purchases, which asks Google itself.
+    if (!grantOnly && url.pathname !== "/v1/purchases") {
+      account = await refreshed(account, env, store, device, now.getTime(), fetcher, later);
+      await takeBackRefunds(account, env, store, device, now.getTime(), fetcher, later);
+    }
   }
   const pickFor = (a: Account) => grantOnly ? (grantLeft(a.grant) ? { bucket: "grant" as Bucket, paid: true } : null)
     : choose(a, now.getTime(), free);
@@ -508,7 +532,10 @@ export async function yiddishCheck(env: Env, store: Store, device: unknown, toke
   const free = Number(env.FREE_SECONDS_PER_MONTH);
   let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null));
   const vouched = typeof token === "string" && !!env.DEVICE_TOKEN_SECRET && await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token);
-  if (vouched) a = await refreshed(a, env, store, device, now.getTime(), fetcher, defer);
+  if (vouched) {
+    a = await refreshed(a, env, store, device, now.getTime(), fetcher, defer);
+    await takeBackRefunds(a, env, store, device, now.getTime(), fetcher, defer);
+  }
   if (!vouched && !a.grant) {
     return { ok: false, status: 403, code: "device_unverified", message: "Google Play couldn't confirm this phone." };
   }
