@@ -162,8 +162,13 @@ export const SILENT_GRACE_MS = 24 * 3600_000;
 /** States Google can still turn back into a paid subscription without a new purchase. */
 const MAY_RECOVER = ["ACTIVE", "IN_GRACE_PERIOD", "ON_HOLD", "PAUSED", "PENDING"];
 
-/** States where Google gives no access, whatever the expiry says. */
-const NOT_PAID = ["EXPIRED", "PENDING", "PENDING_PURCHASE_CANCELED"];
+/**
+ * States where Google gives no access, whatever the expiry says (developer.android.com/google/play/
+ * billing/lifecycle/subscriptions, checked 2026-11-25): revoked or charged back is EXPIRED, "revoke the
+ * user's entitlement immediately" (Revocations); account hold, "block access" (Account hold); paused,
+ * "the user doesn't have access" (Paused subscriptions); and sign-ups not paid yet.
+ */
+const NOT_PAID = ["EXPIRED", "ON_HOLD", "PAUSED", "PENDING", "PENDING_PURCHASE_CANCELED"];
 
 /**
  * Whether [sub] pays now: before its expiry, which Google moves forward on each renewal and during
@@ -172,9 +177,8 @@ const NOT_PAID = ["EXPIRED", "PENDING", "PENDING_PURCHASE_CANCELED"];
  */
 export function subscribed(sub: Sub | null | undefined, now: number): boolean {
   if (!sub) return false;
-  // Never paid, or taken back: a revoked or charged-back subscription is EXPIRED but can keep its
-  // future expiry, and Google says to end access at once (developer.android.com/google/play/billing/
-  // lifecycle/subscriptions, Revocations). Pending sign-ups haven't been paid yet.
+  // Never paid, taken back, on hold or paused: a revoked or charged-back subscription is EXPIRED but
+  // can keep its future expiry. Pending sign-ups haven't been paid yet.
   if (NOT_PAID.includes(sub.state ?? "")) return false;
   if (sub.expiry > now) return true;
   // Only when Google's own answer was already past its expiry; otherwise ask again once it passes.
@@ -183,35 +187,55 @@ export function subscribed(sub: Sub | null | undefined, now: number): boolean {
 }
 
 /**
- * Whether to ask Google about a lapsed [sub] again (bug found 2026-11-25: the server learned of a
- * renewal only when the app was opened, so a subscriber who only uses the mic button was refused
- * after the first month). Always once after each expiry, since that is when Google renews it. After
- * that only while Google said it may still recover (account hold, paused, pending), once a day as
- * Play's silent grace period suggests. Expired, canceled and unknown ones wait for the app to send
- * the purchase again (POST /v1/purchases, on every app start).
+ * Whether to ask Google about [sub] again (bug found 2026-11-25: the server learned of a renewal only
+ * when the app was opened, so a subscriber who only uses the mic button was refused after the first
+ * month). While it still pays: once a day, because a refund or chargeback ends it at once and nothing
+ * else tells this server (the app sends only purchases the phone still owns, and a revoked one isn't).
+ * Once it lapsed: once after each expiry, since that is when Google renews it, unless Google already
+ * said it pays nothing. After that only while Google said it may still recover (account hold, paused,
+ * pending), once a day as Play's silent grace period suggests. Expired, canceled and unknown ones wait
+ * for the app to send the purchase again (POST /v1/purchases, on every app start).
  */
 export function recheckDue(sub: Sub | null | undefined, now: number): boolean {
-  if (!sub || subscribed(sub, now)) return false;
-  if (sub.checked == null || sub.checked < sub.expiry) return true;
-  return MAY_RECOVER.includes(sub.state ?? "") && now - sub.checked >= SILENT_GRACE_MS;
+  if (!sub) return false;
+  const dayOld = sub.checked == null || now - sub.checked >= SILENT_GRACE_MS;
+  if (subscribed(sub, now)) return dayOld;
+  if (sub.checked == null || (sub.checked < sub.expiry && !NOT_PAID.includes(sub.state ?? ""))) return true;
+  return MAY_RECOVER.includes(sub.state ?? "") && dayOld;
 }
 
-/** [a] with its subscription as Google says it is now, when it lapsed and it's time to ask (recheckDue). */
+/**
+ * [a] with its subscription as Google says it is now, when it's time to ask (recheckDue). One that
+ * still pays is asked through [defer] when given, after the answer went back, so the call is no
+ * slower; a refund then counts from the next call.
+ */
 export async function refreshed(a: Account, env: Env, store: Store, device: string, now: number,
-                                fetcher: typeof fetch): Promise<Account> {
+                                fetcher: typeof fetch, defer?: (work: Promise<unknown>) => unknown): Promise<Account> {
   const sub = a.sub;
-  if (!sub || !env.GOOGLE_SERVICE_ACCOUNT || !recheckDue(sub, now)) return a;
-  let v: Verified;
-  try {
-    v = await verify(env.GOOGLE_SERVICE_ACCOUNT, sub.product, sub.token, true, fetcher, now);
-  } catch {
-    return a; // Google didn't answer: keep what we know and ask on the next call.
+  const serviceAccount = env.GOOGLE_SERVICE_ACCOUNT;
+  if (!sub || !serviceAccount || !recheckDue(sub, now)) return a;
+  const paid = subscribed(sub, now);
+  const ask = async (): Promise<Sub | null> => {
+    let v: Verified;
+    try {
+      v = await verify(serviceAccount, sub.product, sub.token, true, fetcher, now);
+    } catch {
+      return null; // Google didn't answer: keep what we know and ask on the next call.
+    }
+    const next: Sub = v?.kind === "subscription"
+      ? { token: sub.token, product: v.product, expiry: v.expiry, state: v.state, checked: now }
+      // Google doesn't know the token: a lapsed one is gone; one that still pays keeps its paid month.
+      : { token: sub.token, product: sub.product, expiry: sub.expiry, state: paid ? sub.state ?? null : "GONE", checked: now };
+    console.log("Subscription re-checked with Google:", next.state, "until", new Date(next.expiry).toISOString());
+    await store.saveSubscription(device, next);
+    return next;
+  };
+  if (paid && defer) {
+    await defer(ask().catch((e) => console.error("Subscription re-check failed:", e)));
+    return a;
   }
-  const next: Sub = v?.kind === "subscription"
-    ? { token: sub.token, product: v.product, expiry: v.expiry, state: v.state, checked: now }
-    : { token: sub.token, product: sub.product, expiry: sub.expiry, state: "GONE", checked: now };
-  console.log("Subscription re-checked with Google:", next.state, "until", new Date(next.expiry).toISOString());
-  await store.saveSubscription(device, next);
+  const next = await ask();
+  if (!next) return a;
   // A paid renewal is a new paid month, whose hours start unused; a grace period keeps the month before.
   const period = usagePeriod(sub, next);
   return { ...a, sub: { ...next, period, used: period === (sub.period ?? sub.expiry) ? sub.used : 0 } };
@@ -370,8 +394,9 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     const refused = await unverified(request, env, device);
     if (refused && !account.grant) return refused;
     grantOnly = !!refused;
-    // A lapsed subscription may have renewed since. Not for /v1/purchases, which asks Google itself.
-    if (!grantOnly && url.pathname !== "/v1/purchases") account = await refreshed(account, env, store, device, now.getTime(), fetcher);
+    // A lapsed subscription may have renewed since, and a paid one may have been refunded. Not for
+    // /v1/purchases, which asks Google itself.
+    if (!grantOnly && url.pathname !== "/v1/purchases") account = await refreshed(account, env, store, device, now.getTime(), fetcher, later);
   }
   const pickFor = (a: Account) => grantOnly ? (grantLeft(a.grant) ? { bucket: "grant" as Bucket, paid: true } : null)
     : choose(a, now.getTime(), free);
@@ -475,14 +500,15 @@ export type CheckAnswer = { ok: true } | { ok: false; status: number; code: stri
  */
 export async function yiddishCheck(env: Env, store: Store, device: unknown, token: unknown,
                                    now = new Date(), rawCode: unknown = null,
-                                   fetcher: typeof fetch = fetch): Promise<CheckAnswer> {
+                                   fetcher: typeof fetch = fetch,
+                                   defer?: (work: Promise<unknown>) => unknown): Promise<CheckAnswer> {
   if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) {
     return { ok: false, status: 400, code: "no_device", message: "Missing device ID." };
   }
   const free = Number(env.FREE_SECONDS_PER_MONTH);
   let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null));
   const vouched = typeof token === "string" && !!env.DEVICE_TOKEN_SECRET && await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token);
-  if (vouched) a = await refreshed(a, env, store, device, now.getTime(), fetcher);
+  if (vouched) a = await refreshed(a, env, store, device, now.getTime(), fetcher, defer);
   if (!vouched && !a.grant) {
     return { ok: false, status: 403, code: "device_unverified", message: "Google Play couldn't confirm this phone." };
   }

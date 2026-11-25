@@ -287,26 +287,87 @@ describe("transcription server", () => {
       sub: { token: "t", product: "monthly", expiry: later, state: "EXPIRED", checked: now.getTime(), used: 0 } }, now.getTime(), 1800)).toBeNull();
   });
 
+  const DAY = 24 * 3600_000;
+  /** Google's Play API answering [state] and [expiry] for every subscription (410 when [expiry] is null). */
+  async function googleSays(state: string, expiry: number | null) {
+    const { generateKeyPairSync } = await import("node:crypto");
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const sa = JSON.stringify({ client_email: "x@y", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) });
+    const asked: string[] = [];
+    const fetcher = (async (u: string) => {
+      if (u.includes("oauth2")) return Response.json({ access_token: "a", expires_in: 3600 });
+      if (u.includes("subscriptionsv2")) {
+        asked.push(u);
+        if (expiry == null) return new Response("gone", { status: 410 });
+        return Response.json({ subscriptionState: "SUBSCRIPTION_STATE_" + state,
+          lineItems: [{ productId: "monthly", expiryTime: new Date(expiry).toISOString() }] });
+      }
+      return Response.json({ text: "hello", usage: { seconds: 10 } });
+    }) as unknown as typeof fetch;
+    return { e: { ...env, GOOGLE_SERVICE_ACCOUNT: sa }, fetcher, asked };
+  }
+
+  describe("a subscription that still looks paid in the database", () => {
+    const paid = { token: "sub", product: "monthly", expiry: later, state: "ACTIVE" };
+
+    it("notices a refund or chargeback within a day, without slowing the call", async () => {
+      // Revoked: Google says EXPIRED and may keep the future expiry. The app never sends a revoked purchase again.
+      const g = await googleSays("EXPIRED", later);
+      const { s, store } = memoryStore({ free: 1800, sub: { ...paid, checked: now.getTime() - DAY } });
+      const deferred: Promise<unknown>[] = [];
+      const first = await handle(transcribe(10), g.e, store, now, g.fetcher, (p) => { deferred.push(p); });
+      expect(first.status).toBe(200); // served on what was known; Google is asked after the answer
+      await Promise.all(deferred);
+      expect(g.asked).toHaveLength(1);
+      expect(s.sub).toMatchObject({ state: "EXPIRED", checked: now.getTime() });
+      const second = await handle(transcribe(10), g.e, store, now, g.fetcher);
+      expect(second.status).toBe(402);
+      expect(g.asked).toHaveLength(1); // and not asked again on every call
+    });
+
+    it("asks at most once a day while it pays", async () => {
+      const g = await googleSays("ACTIVE", later);
+      const { s, store } = memoryStore({ free: 1800, sub: { ...paid, checked: now.getTime() - DAY + 60_000 } });
+      expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(200);
+      expect(g.asked).toHaveLength(0);
+      await handle(transcribe(10), g.e, store, new Date(now.getTime() + 60_000), g.fetcher);
+      expect(g.asked).toHaveLength(1);
+      expect(s.sub).toMatchObject({ state: "ACTIVE", checked: now.getTime() + 60_000, period: later });
+      await handle(transcribe(10), g.e, store, new Date(now.getTime() + 2 * 60_000), g.fetcher);
+      expect(g.asked).toHaveLength(1);
+    });
+
+    it("keeps serving a paid month when Google doesn't know the token, and asks again a day later", async () => {
+      const g = await googleSays("", null);
+      const { s, store } = memoryStore({ free: 1800, sub: { ...paid, checked: now.getTime() - DAY } });
+      await handle(transcribe(10), g.e, store, now, g.fetcher);
+      expect(s.sub).toMatchObject({ state: "ACTIVE", expiry: later, checked: now.getTime() });
+      expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(200);
+      expect(g.asked).toHaveLength(1);
+    });
+
+    it("never serves account hold, a pause or an unpaid sign-up, whatever the expiry, and asks about them once a day", async () => {
+      for (const state of ["ON_HOLD", "PAUSED", "PENDING"]) {
+        const g = await googleSays(state, later);
+        const { store } = memoryStore({ free: 1800, sub: { ...paid, state, checked: now.getTime() } });
+        expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(402);
+        await handle(transcribe(10), g.e, store, new Date(now.getTime() + DAY - 1), g.fetcher);
+        expect(g.asked).toHaveLength(0);
+        await handle(transcribe(10), g.e, store, new Date(now.getTime() + DAY), g.fetcher);
+        expect(g.asked).toHaveLength(1);
+      }
+    });
+
+    it("doesn't ask on every call about a revoked one whose expiry is still ahead", async () => {
+      const g = await googleSays("EXPIRED", later);
+      const { store } = memoryStore({ free: 1800, sub: { ...paid, state: "EXPIRED", checked: now.getTime() } });
+      for (const t of [0, DAY, 10 * DAY]) await handle(transcribe(10), g.e, store, new Date(now.getTime() + t), g.fetcher);
+      expect(g.asked).toHaveLength(0);
+    });
+  });
+
   describe("a subscription that lapsed in the database", () => {
     const lapsed = { token: "sub", product: "monthly", expiry: now.getTime() - 60_000 };
-    const DAY = 24 * 3600_000;
-    async function googleSays(state: string, expiry: number | null) {
-      const { generateKeyPairSync } = await import("node:crypto");
-      const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-      const sa = JSON.stringify({ client_email: "x@y", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) });
-      const asked: string[] = [];
-      const fetcher = (async (u: string) => {
-        if (u.includes("oauth2")) return Response.json({ access_token: "a", expires_in: 3600 });
-        if (u.includes("subscriptionsv2")) {
-          asked.push(u);
-          if (expiry == null) return new Response("gone", { status: 410 });
-          return Response.json({ subscriptionState: "SUBSCRIPTION_STATE_" + state,
-            lineItems: [{ productId: "monthly", expiryTime: new Date(expiry).toISOString() }] });
-        }
-        return Response.json({ text: "hello", usage: { seconds: 10 } });
-      }) as unknown as typeof fetch;
-      return { e: { ...env, GOOGLE_SERVICE_ACCOUNT: sa }, fetcher, asked };
-    }
 
     it("asks Google and keeps serving a subscriber Google renewed", async () => {
       const g = await googleSays("ACTIVE", later);
