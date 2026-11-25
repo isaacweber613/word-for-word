@@ -202,6 +202,11 @@ the code at the next call, and the app forgets it (`/v1/usage` answers `access: 
 - Play policy: free hours are not a sale, so Play Billing doesn't apply (Payments policy). The Data
   safety form needs Email address (collected, processed ephemerally, optional, app functionality and
   account management) when the build with sign-in goes to Play. PRIVACY.md has the section.
+- Shipped 2026-11-24: word-for-word Worker 83970dd9, the site's Access tab, 0.9.15 (versionCode 52)
+  on GitHub only. Checked live: a phone out of free minutes was refused with no code or a wrong
+  code, served with a 36-second grant until it ran out (then 402 `given_hours_used`), always served
+  with unlimited; a real Google ID token for the web client got the email's code and a served
+  recording; a removed code stopped at once; the GitHub APK on an emulator took a typed code.
 
 ## Testing the keyboard shortcut on an emulator
 
