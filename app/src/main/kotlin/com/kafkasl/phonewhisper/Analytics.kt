@@ -21,6 +21,9 @@ object Analytics {
         val config = PostHogAndroidConfig(apiKey = BuildConfig.POSTHOG_KEY, host = BuildConfig.POSTHOG_HOST).apply {
             optOut = !enabled(app)
             sessionReplay = false
+            // On by default, it sends every opened link's full address as "Deep Link Opened", and an
+            // access link carries the person's access code (Access.LINK), which then works for anyone.
+            captureDeepLinks = false
         }
         PostHogAndroid.setup(app, config)
         // Which of the three builds (browser, selfInstall, play) and whether it's a test build.

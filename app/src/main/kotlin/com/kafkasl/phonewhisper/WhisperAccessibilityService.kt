@@ -77,7 +77,8 @@ class WhisperAccessibilityService : AccessibilityService() {
     /** RETRY: a recording failed to transcribe and is kept. Tap sends it again, hold discards it. */
     private enum class State { IDLE, RECORDING, TRANSCRIBING, RETRY }
 
-    private var state = State.IDLE
+    /** Volatile: the recording thread reads it to know when to stop. */
+    @Volatile private var state = State.IDLE
     /** The recording that failed to transcribe, kept so a tap can send it again. */
     private var failedPcm: ByteArray? = null
     /** The History entry a failed recording was saved to (its audio, entry time), so a later try updates it. */
@@ -348,6 +349,14 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        // Turning the service off mid-recording used to leave the microphone recording in the
+        // background, since the recording thread runs until the state leaves RECORDING.
+        state = State.IDLE
+        handler.removeCallbacksAndMessages(null)
+        try { audioRecord?.stop() } catch (_: Exception) {}
+        audioRecord?.release()
+        audioRecord = null
+        pcmStream = null
         opusStream?.cancel()
         consentDialog?.dismiss()
         instance = null
@@ -861,7 +870,9 @@ class WhisperAccessibilityService : AccessibilityService() {
             toast("Couldn't start the microphone. Another app may be using it.")
             return
         }
-        pcmStream = ByteArrayOutputStream()
+        val rec = audioRecord!!
+        val out = ByteArrayOutputStream()
+        pcmStream = out
         // Cloud takes compress while recording and open the upload connection now, so the text
         // comes back sooner after the stop. Yiddish takes go to the PC as WAV.
         val opus = if (yiddish) null else OggOpus.Stream.start()
@@ -876,14 +887,22 @@ class WhisperAccessibilityService : AccessibilityService() {
         startPulse()
         buzz()
 
+        // Only this recording's microphone and buffers, so a quick stop and start never mixes two recordings.
         thread {
             val buf = ByteArray(bufSize)
-            while (state == State.RECORDING) {
-                val n = audioRecord?.read(buf, 0, buf.size) ?: break
+            while (state == State.RECORDING && audioRecord === rec) {
+                val n = rec.read(buf, 0, buf.size)
                 if (n > 0) {
-                    pcmStream?.write(buf, 0, n)
+                    out.write(buf, 0, n)
                     opus?.write(buf, n)
                     bars?.setLevel(levelOf(buf, n))
+                } else if (n < 0) {
+                    // The microphone went away (a headset or Bluetooth mic disconnected, the audio system
+                    // restarted). Reading again fails the same way, which used to spin forever with the
+                    // button still recording; stop and send what was said so far.
+                    Log.w(TAG, "Microphone read failed ($n); stopping the recording")
+                    handler.post { if (state == State.RECORDING && audioRecord === rec) stopAndTranscribe() }
+                    break
                 }
             }
         }
@@ -1295,7 +1314,9 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
         Log.i(
             TAG,
-            "$prefix package=${node.packageName} class=${node.className} focused=${node.isFocused} editable=${node.isEditable} text=${node.text} desc=${node.contentDescription} actions=[$actions]"
+            // Never the box's text or description: that is what the person wrote, and the log is kept in release builds.
+            "$prefix package=${node.packageName} class=${node.className} focused=${node.isFocused} editable=${node.isEditable} " +
+                "textLength=${node.text?.length ?: 0} actions=[$actions]"
         )
     }
 
