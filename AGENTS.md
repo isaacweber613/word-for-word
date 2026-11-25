@@ -200,6 +200,11 @@ person stops the code at the next call, and the app forgets it (`/v1/usage` answ
   client "Word for Word server", three Android clients); nothing uses them.
 - Play policy: free hours are not a sale, so Play Billing doesn't apply (Payments policy: apps "requiring
   or accepting payment for access to in-app features or services" must use Play billing).
+- Shipped 2026-11-24: server Worker fd7d8f65 (assetlinks route), docs site a992248c, the Access page in
+  yiddishvoicetotext site 15762b4a (one Admin tab with Models and Access under it), app 6ba7930 as 0.9.16
+  (versionCode 53) on GitHub, Play internal testing, and in Google's review for closed testing. Play APK
+  2,718,858 bytes (0.9.14: 2,717,040). Checked on the emulator: `nuchemweber.com: verified`, and opening a
+  link showed "Done. Your hours are ready to use." with Settings showing the code in use.
 
 ## Testing the keyboard shortcut on an emulator
 
