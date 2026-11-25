@@ -33,6 +33,8 @@ object Billing {
     const val SUBSCRIPTION = "monthly"
     const val HOURS = "extra_hours_4"
     const val available = true
+    /** What the purchase callback gets when the person backed out of Google Play's screen. */
+    const val CANCELED = "canceled"
 
     private var client: BillingClient? = null
     private var appContext: Context? = null
@@ -97,7 +99,7 @@ object Billing {
                         "It tries again each time you open the app.")
                 }
             }
-            BillingClient.BillingResponseCode.USER_CANCELED -> {}
+            BillingClient.BillingResponseCode.USER_CANCELED -> done?.invoke(CANCELED)
             BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED -> appContext?.let { sync(it) { done?.invoke(null) } }
             else -> done?.invoke("Google Play couldn't finish the purchase (${result.debugMessage.ifBlank { "error ${result.responseCode}" }}).")
         }

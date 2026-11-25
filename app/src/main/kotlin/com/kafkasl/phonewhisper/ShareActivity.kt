@@ -29,7 +29,7 @@ import kotlin.concurrent.thread
  * same way; only its sound is read.
  */
 class ShareActivity : AppCompatActivity() {
-    private var dialog: AlertDialog? = null
+    private var dialog: android.app.Dialog? = null
     /** The label of the progress dialog while it is showing. */
     private var progress: TextView? = null
     /** The whole file as 16 kHz mono PCM, kept in the app's cache until this screen closes. */
@@ -61,6 +61,8 @@ class ShareActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        // The subscribe sheet acts when it's dismissed; closing the screen shouldn't trigger that.
+        dialog?.setOnDismissListener(null)
         dialog?.dismiss()
         pcm?.delete()
         super.onDestroy()
@@ -116,7 +118,7 @@ class ShareActivity : AppCompatActivity() {
     private fun send(piece: ByteArray) {
         val wav = WavWriter.encode(piece)
         if (!yiddish) { sendCloud(piece, wav); return }
-        if (FreeMinutes.out(this)) { ui { fail(FreeMinutes.outMessage(this)) }; return }
+        if (FreeMinutes.out(this)) { ui { fail(FreeMinutes.outMessage(this)) { showProgress(); thread { send(piece) } } }; return }
         val install = YiddishServer.installId(this)
         val result = YiddishServer.transcribeJob(this, wav, BuildConfig.VERSION_NAME, install, "app-share") { f ->
             ui { showProgress(done + (f * piece.size).toLong()) }
@@ -185,6 +187,13 @@ class ShareActivity : AppCompatActivity() {
         val close = {
             if (texts.isEmpty()) finish()
             else { notice = "Only the first part was transcribed."; finishWith() }
+        }
+        // Out of minutes or hours: offer the purchase right here, then carry on with the file (Isaac, 2026-11-25).
+        if (retry != null && SubscribeSheet.offers(message)) {
+            dialog?.dismiss()
+            progress = null
+            dialog = SubscribeSheet.show(this, message == FreeMinutes.OUT_HOURS, null) { bought -> if (bought) retry() else close() }
+            return
         }
         val b = AlertDialog.Builder(this).setMessage(message).setNegativeButton("Close") { _, _ -> close() }
         retry?.let { b.setPositiveButton("Try again") { _, _ -> it() } }

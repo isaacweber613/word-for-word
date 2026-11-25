@@ -68,6 +68,16 @@
             </intent-filter>
         </activity>
 
+        <!-- Out of minutes or hours while dictating: a sheet over the current app to buy more
+             (SubscribeSheet.kt). Its own task, so the app's main screen doesn't come up behind it. -->
+        <activity
+            android:name=".SubscribeActivity"
+            android:exported="false"
+            android:theme="@style/Theme.PhoneWhisper.Share"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|uiMode" />
+
         <!-- Shares a recording saved in History (HistoryActivity). -->
         <provider
             android:name="androidx.core.content.FileProvider"

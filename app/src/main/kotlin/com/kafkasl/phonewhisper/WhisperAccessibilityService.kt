@@ -762,7 +762,9 @@ class WhisperAccessibilityService : AccessibilityService() {
             state = State.RETRY
             setBusy(false)
             setAppearance(COLOR_RETRY)
-            showFeedback(if (shortcut != null) "$msg\nPress the shortcut to try again." else "$msg\nTap to try again. Hold to discard.", 4000)
+            // Out of minutes or hours: a sheet to buy more opens instead (Isaac, 2026-11-25), and the next press sends this recording again.
+            val say = { showFeedback(if (shortcut != null) "$msg\nPress the shortcut to try again." else "$msg\nTap to try again. Hold to discard.", 4000) }
+            if (!SubscribeSheet.offer(this, msg) { if (state == State.RETRY) say() }) say()
         }
     }
 
@@ -829,7 +831,11 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun startRecording(via: String, yiddish: Boolean = false) {
         if (yiddish && YiddishServer.needsConsent(prefs())) { askYiddishConsent(via); return }
         // Uses the same minutes and hours as other recordings, whatever key is typed (AGENTS.local.md).
-        if (yiddish && FreeMinutes.out(this)) { toast(FreeMinutes.outMessage(this)); return }
+        if (yiddish && FreeMinutes.out(this)) {
+            val msg = FreeMinutes.outMessage(this)
+            if (!SubscribeSheet.offer(this, msg) { toast(msg) }) toast(msg)
+            return
+        }
         if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)
             != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             toast("Microphone permission is off. Open Word for Word to turn it on."); return

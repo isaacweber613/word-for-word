@@ -512,7 +512,7 @@ class MainActivity : AppCompatActivity() {
     private fun onPlanTap() {
         val done: (String?) -> Unit = { message ->
             runOnUiThread {
-                if (message != null && !isFinishing) {
+                if (message != null && message != Billing.CANCELED && !isFinishing) {
                     android.app.AlertDialog.Builder(this).setMessage(message).setPositiveButton("OK", null).show()
                 }
                 loadFreeMinutes()
