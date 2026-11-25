@@ -7,8 +7,7 @@
  */
 import { createHmac, generateKeyPairSync } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { convertV4MiniflareOptions, Miniflare, Response as MfResponse } from "miniflare";
@@ -16,10 +15,10 @@ import { convertV4MiniflareOptions, Miniflare, Response as MfResponse } from "mi
 const SERVER = fileURLToPath(new URL("..", import.meta.url));
 
 let bundled: string | null = null;
-/** src/worker.ts bundled by `wrangler deploy --dry-run`, once per test run. */
+/** src/worker.ts bundled by `wrangler deploy --dry-run`, once per test run, into the ignored .wrangler folder. */
 function bundle(): string {
   if (bundled) return bundled;
-  const out = mkdtempSync(join(tmpdir(), "wfw-local-"));
+  const out = join(SERVER, ".wrangler", "local-test");
   execFileSync(process.execPath, [join(SERVER, "node_modules/wrangler/bin/wrangler.js"), "deploy", "--dry-run", "--outdir", out],
     { cwd: SERVER, env: { ...process.env, WRANGLER_SEND_METRICS: "false" }, stdio: "pipe" });
   return (bundled = join(out, "worker.js"));
