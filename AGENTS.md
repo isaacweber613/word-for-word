@@ -147,6 +147,20 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   until the account-level "View app information and download bulk reports (read-only)" was added
   on 2026-11-24, and purchase checks worked minutes after a product edit. Its JSON key is only the
   Worker secret `GOOGLE_SERVICE_ACCOUNT`.
+- Renewals (2026-11-25): the server used to learn a new expiry only when the app was opened
+  (`Billing.sync` posts the purchase), so a subscriber who only used the mic button was refused after
+  the first month although Google had charged them. Now a call that finds the stored subscription
+  past its expiry asks Google (subscriptionsv2) once, stores the new expiry, Google's state and the
+  time (`subscriptions.state`, `.checked`), and serves if it renewed or is in its grace period.
+  Account hold, paused and pending are asked again once a day (Play's 24-hour silent grace period,
+  the only wait Google's docs give); expired, canceled and unknown tokens wait for the app to post a
+  purchase. A canceled subscription now works until its paid month ends (before, it was refused).
+  Real-time developer notifications were not used: they need a Pub/Sub topic, a push endpoint that
+  checks Google's signed token and a Play Console setting, for the same result. Checked live on
+  Isaac's test subscription: Google said EXPIRED (paid until 13:48 UTC), and the server answered
+  `subscribed: false` without asking Google a second time.
+  Not fixed: hours used are kept per expiry, so a grace period that moves the expiry starts the
+  10 hours again.
 
 ## Paid plan (agreed with Isaac 2026-11-20, built the same day)
 

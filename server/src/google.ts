@@ -45,13 +45,15 @@ async function accessToken(json: string, scope: string, fetcher: typeof fetch, n
 }
 
 export type Verified =
-  | { kind: "subscription"; product: string; expiry: number }
+  | { kind: "subscription"; product: string; expiry: number; state: string }
   | { kind: "product"; product: string }
   | null;
 
 /**
- * Asks Google about [token]. A subscription that is active (or in its grace period) gives the
- * end of its paid month; a one-time product counts only once it's paid. Anything else is null.
+ * Asks Google about [token]. A subscription gives its state (subscriptionState without the
+ * SUBSCRIPTION_STATE_ prefix: ACTIVE, IN_GRACE_PERIOD, ON_HOLD, CANCELED, EXPIRED, ...) and the end
+ * of its paid time, whatever the state, so the server can tell a lapse from a renewal. A one-time
+ * product counts only once it's paid. A token Google doesn't know is null.
  */
 export async function verify(serviceAccount: string, product: string, token: string, subscription: boolean,
                              fetcher: typeof fetch, now: number): Promise<Verified> {
@@ -60,10 +62,10 @@ export async function verify(serviceAccount: string, product: string, token: str
     const res = await fetcher(API + "/subscriptionsv2/tokens/" + encodeURIComponent(token), { headers: auth });
     if (!res.ok) return refused(res, serviceAccount);
     const s = await res.json() as { subscriptionState?: string; lineItems?: { productId?: string; expiryTime?: string }[] };
-    if (s.subscriptionState !== "SUBSCRIPTION_STATE_ACTIVE" && s.subscriptionState !== "SUBSCRIPTION_STATE_IN_GRACE_PERIOD") return null;
     const item = s.lineItems?.find((i) => i.productId === product) ?? s.lineItems?.[0];
     const expiry = Date.parse(item?.expiryTime ?? "");
-    return Number.isFinite(expiry) ? { kind: "subscription", product: item?.productId ?? product, expiry } : null;
+    const state = (s.subscriptionState ?? "UNSPECIFIED").replace(/^SUBSCRIPTION_STATE_/, "");
+    return Number.isFinite(expiry) ? { kind: "subscription", product: item?.productId ?? product, expiry, state } : null;
   }
   const res = await fetcher(API + "/products/" + encodeURIComponent(product) + "/tokens/" + encodeURIComponent(token), { headers: auth });
   if (!res.ok) return refused(res, serviceAccount);

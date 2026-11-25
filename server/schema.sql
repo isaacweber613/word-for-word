@@ -19,7 +19,12 @@ CREATE TABLE IF NOT EXISTS models (
 CREATE TABLE IF NOT EXISTS subscriptions (
   token TEXT PRIMARY KEY,
   product TEXT NOT NULL,
-  expiry INTEGER NOT NULL
+  expiry INTEGER NOT NULL,
+  -- What Google said the last time the server asked (ACTIVE, IN_GRACE_PERIOD, ON_HOLD, CANCELED, EXPIRED,
+  -- GONE for a token Google no longer knows) and when (ms). Added 2026-11-25:
+  -- ALTER TABLE subscriptions ADD COLUMN state TEXT; ALTER TABLE subscriptions ADD COLUMN checked INTEGER.
+  state TEXT,
+  checked INTEGER
 );
 
 -- Which phones a subscription is on (the same Google account on more than one phone shares it).

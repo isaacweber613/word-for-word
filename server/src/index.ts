@@ -54,7 +54,7 @@
  */
 
 import { decodeIntegrity, PACKAGE, verify, type IntegrityPayload, type Verified } from "./google";
-import { d1Store, type Account, type Bucket, type Grant, type ModelChoice, type Store } from "./store";
+import { d1Store, type Account, type Bucket, type Grant, type ModelChoice, type Store, type Sub } from "./store";
 
 export interface Env {
   DB: D1Database;
@@ -153,17 +153,72 @@ export function accessCode(raw: string | null | undefined): string | null {
 }
 
 /**
+ * Play keeps a subscription ACTIVE for at least a day after a renewal fails (its "silent grace
+ * period") and says to ask again after those 24 hours
+ * (developer.android.com/google/play/billing/lifecycle/subscriptions, Silent grace period).
+ */
+export const SILENT_GRACE_MS = 24 * 3600_000;
+
+/** States Google can still turn back into a paid subscription without a new purchase. */
+const MAY_RECOVER = ["ACTIVE", "IN_GRACE_PERIOD", "ON_HOLD", "PAUSED", "PENDING"];
+
+/**
+ * Whether [sub] pays now: before its expiry, which Google moves forward on each renewal and during
+ * the grace period. Also when Google last said ACTIVE or IN_GRACE_PERIOD but its expiry was already
+ * behind (a renewal still being charged, or the silent grace period), for the day Play waits.
+ */
+export function subscribed(sub: Sub | null | undefined, now: number): boolean {
+  if (!sub) return false;
+  if (sub.expiry > now) return true;
+  return (sub.state === "ACTIVE" || sub.state === "IN_GRACE_PERIOD") && sub.checked != null && now - sub.checked < SILENT_GRACE_MS;
+}
+
+/**
+ * Whether to ask Google about a lapsed [sub] again (bug found 2026-11-25: the server learned of a
+ * renewal only when the app was opened, so a subscriber who only uses the mic button was refused
+ * after the first month). Always once after each expiry, since that is when Google renews it. After
+ * that only while Google said it may still recover (account hold, paused, pending), once a day as
+ * Play's silent grace period suggests. Expired, canceled and unknown ones wait for the app to send
+ * the purchase again (POST /v1/purchases, on every app start).
+ */
+export function recheckDue(sub: Sub | null | undefined, now: number): boolean {
+  if (!sub || subscribed(sub, now)) return false;
+  if (sub.checked == null || sub.checked < sub.expiry) return true;
+  return MAY_RECOVER.includes(sub.state ?? "") && now - sub.checked >= SILENT_GRACE_MS;
+}
+
+/** [a] with its subscription as Google says it is now, when it lapsed and it's time to ask (recheckDue). */
+export async function refreshed(a: Account, env: Env, store: Store, device: string, now: number,
+                                fetcher: typeof fetch): Promise<Account> {
+  const sub = a.sub;
+  if (!sub || !env.GOOGLE_SERVICE_ACCOUNT || !recheckDue(sub, now)) return a;
+  let v: Verified;
+  try {
+    v = await verify(env.GOOGLE_SERVICE_ACCOUNT, sub.product, sub.token, true, fetcher, now);
+  } catch {
+    return a; // Google didn't answer: keep what we know and ask on the next call.
+  }
+  const next: Sub = v?.kind === "subscription"
+    ? { token: sub.token, product: v.product, expiry: v.expiry, state: v.state, checked: now }
+    : { token: sub.token, product: sub.product, expiry: sub.expiry, state: "GONE", checked: now };
+  console.log("Subscription re-checked with Google:", next.state, "until", new Date(next.expiry).toISOString());
+  await store.saveSubscription(device, next);
+  // A new expiry is a new paid month, whose hours start unused.
+  return { ...a, sub: { ...next, used: next.expiry === sub.expiry ? sub.used : 0 } };
+}
+
+/**
  * What pays for the next recording: hours given on the Access page first (so a gift never uses up
  * the free minutes or paid hours), then this month's free minutes, then the subscription's
  * hours, then bought hours (only while subscribed). Paying phones get the paid models even on
  * free minutes. Null when nothing is left.
  */
 export function choose(a: Account, now: number, free: number): { bucket: Bucket; paid: boolean } | null {
-  const subscribed = !!a.sub && a.sub.expiry > now;
+  const paying = subscribed(a.sub, now);
   // Given hours get the paid models and count like paid hours.
   if (grantLeft(a.grant)) return { bucket: "grant", paid: true };
-  if (a.freeUsed < free) return { bucket: "free", paid: subscribed };
-  if (!subscribed) return null;
+  if (a.freeUsed < free) return { bucket: "free", paid: paying };
+  if (!paying) return null;
   if (a.sub!.used < SUB_SECONDS) return { bucket: "sub", paid: true };
   if (a.credit > 0) return { bucket: "credit", paid: true };
   return null;
@@ -175,7 +230,7 @@ function error(status: number, message: string, code?: string): Response {
 
 /** The answer when nothing is left. The app shows its own message for each code. */
 function outOfTime(a: Account, now: number, free: number): Response {
-  if (a.sub && a.sub.expiry > now) return error(402, "You've used this month's hours.", "hours_used");
+  if (subscribed(a.sub, now)) return error(402, "You've used this month's hours.", "hours_used");
   if (a.grant) return error(402, "You've used this month's hours. They start again on the 1st.", "given_hours_used");
   return error(402, "You've used your " + Math.round(free / 60) + " free minutes this month.", "free_minutes_used");
 }
@@ -297,7 +352,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
 
   const code = accessCode(request.headers.get("X-Access-Code"));
   // Loaded before the device check: a valid access code stands in for a device token.
-  const account = device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)
+  let account = device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)
     ? await store.account(device, month, code) : null;
   // Without a device token, given hours (a code's or the phone's own) still work, but only they do.
   let grantOnly = false;
@@ -305,6 +360,8 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     const refused = await unverified(request, env, device);
     if (refused && !account.grant) return refused;
     grantOnly = !!refused;
+    // A lapsed subscription may have renewed since. Not for /v1/purchases, which asks Google itself.
+    if (!grantOnly && url.pathname !== "/v1/purchases") account = await refreshed(account, env, store, device, now.getTime(), fetcher);
   }
   const pickFor = (a: Account) => grantOnly ? (grantLeft(a.grant) ? { bucket: "grant" as Bucket, paid: true } : null)
     : choose(a, now.getTime(), free);
@@ -313,7 +370,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     if (!device || !account) return error(400, "Missing device ID.");
     const a = account, g = a.grant;
     return Response.json({ used_seconds: a.freeUsed, free_seconds: free, month,
-      subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !pickFor(a),
+      subscribed: subscribed(a.sub, now.getTime()), out: !pickFor(a),
       // The hours given to this code; null when the call had no code or the code was removed (the app then
       // forgets it), so hours given to the phone itself don't show here.
       access: g && !g.device ? { who: g.who, seconds: g.seconds, used_seconds: g.used } : null });
@@ -333,11 +390,15 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     } catch {
       return error(503, "Google Play didn't answer. Try again.");
     }
-    if (!v) return error(402, "Google Play doesn't show this purchase as paid.", "not_paid");
-    if (v.kind === "subscription") await store.saveSubscription(device, { token, product: v.product, expiry: v.expiry });
-    else await store.addTopup(token, device, TOPUP_SECONDS, now.getTime());
+    const notPaid = () => error(402, "Google Play doesn't show this purchase as paid.", "not_paid");
+    if (!v) return notPaid();
+    if (v.kind === "subscription") {
+      const sub: Sub = { token, product: v.product, expiry: v.expiry, state: v.state, checked: now.getTime() };
+      if (!subscribed(sub, now.getTime())) return notPaid();
+      await store.saveSubscription(device, sub);
+    } else await store.addTopup(token, device, TOPUP_SECONDS, now.getTime());
     const a = await store.account(device, month, code);
-    return Response.json({ subscribed: !!a.sub && a.sub.expiry > now.getTime(), out: !pickFor(a) });
+    return Response.json({ subscribed: subscribed(a.sub, now.getTime()), out: !pickFor(a) });
   }
 
   if (url.pathname !== "/v1/transcriptions" || request.method !== "POST") return error(404, "Not found.");
@@ -403,13 +464,15 @@ export type CheckAnswer = { ok: true } | { ok: false; status: number; code: stri
  * access code ([rawCode], from the Access page), which also stands in for the token.
  */
 export async function yiddishCheck(env: Env, store: Store, device: unknown, token: unknown,
-                                   now = new Date(), rawCode: unknown = null): Promise<CheckAnswer> {
+                                   now = new Date(), rawCode: unknown = null,
+                                   fetcher: typeof fetch = fetch): Promise<CheckAnswer> {
   if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) {
     return { ok: false, status: 400, code: "no_device", message: "Missing device ID." };
   }
   const free = Number(env.FREE_SECONDS_PER_MONTH);
-  const a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null));
+  let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null));
   const vouched = typeof token === "string" && !!env.DEVICE_TOKEN_SECRET && await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token);
+  if (vouched) a = await refreshed(a, env, store, device, now.getTime(), fetcher);
   if (!vouched && !a.grant) {
     return { ok: false, status: 403, code: "device_unverified", message: "Google Play couldn't confirm this phone." };
   }
@@ -428,7 +491,7 @@ export async function yiddishCharge(env: Env, store: Store, device: unknown, sec
   const a = await store.account(device, month, accessCode(typeof rawCode === "string" ? rawCode : null));
   const pick = choose(a, now.getTime(), Number(env.FREE_SECONDS_PER_MONTH));
   // Nothing left now: the take was allowed when it started, so it still counts.
-  const bucket = pick?.bucket ?? (a.grant ? "grant" : a.sub && a.sub.expiry > now.getTime() ? "sub" : "free");
+  const bucket = pick?.bucket ?? (a.grant ? "grant" : subscribed(a.sub, now.getTime()) ? "sub" : "free");
   await store.charge(device, month, bucket, seconds * YIDDISH_WEIGHT, a.sub, a.grant);
 }
 

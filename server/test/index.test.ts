@@ -261,7 +261,97 @@ describe("transcription server", () => {
       method: "POST", headers: { "X-Device-Id": device }, body: JSON.stringify({ product_id: "monthly", purchase_token: "sub" }),
     }), { ...env, GOOGLE_SERVICE_ACCOUNT: sa }, store, now, google);
     expect(await res.json()).toEqual({ subscribed: true, out: false });
-    expect(s.sub).toEqual({ token: "sub", product: "monthly", expiry: later });
+    expect(s.sub).toEqual({ token: "sub", product: "monthly", expiry: later, state: "ACTIVE", checked: now.getTime() });
+  });
+
+  describe("a subscription that lapsed in the database", () => {
+    const lapsed = { token: "sub", product: "monthly", expiry: now.getTime() - 60_000 };
+    const DAY = 24 * 3600_000;
+    async function googleSays(state: string, expiry: number | null) {
+      const { generateKeyPairSync } = await import("node:crypto");
+      const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const sa = JSON.stringify({ client_email: "x@y", private_key: privateKey.export({ type: "pkcs8", format: "pem" }) });
+      const asked: string[] = [];
+      const fetcher = (async (u: string) => {
+        if (u.includes("oauth2")) return Response.json({ access_token: "a", expires_in: 3600 });
+        if (u.includes("subscriptionsv2")) {
+          asked.push(u);
+          if (expiry == null) return new Response("gone", { status: 410 });
+          return Response.json({ subscriptionState: "SUBSCRIPTION_STATE_" + state,
+            lineItems: [{ productId: "monthly", expiryTime: new Date(expiry).toISOString() }] });
+        }
+        return Response.json({ text: "hello", usage: { seconds: 10 } });
+      }) as unknown as typeof fetch;
+      return { e: { ...env, GOOGLE_SERVICE_ACCOUNT: sa }, fetcher, asked };
+    }
+
+    it("asks Google and keeps serving a subscriber Google renewed", async () => {
+      const g = await googleSays("ACTIVE", later);
+      const { s, store } = memoryStore({ free: 1800, sub: lapsed, subUsed: SUB_SECONDS });
+      const res = await handle(transcribe(10), g.e, store, now, g.fetcher);
+      expect(res.status).toBe(200);
+      expect(s.sub).toMatchObject({ expiry: later, state: "ACTIVE", checked: now.getTime() });
+      expect(s.subUsed).toBeGreaterThan(SUB_SECONDS); // the memory store keeps one counter
+      await handle(transcribe(10), g.e, store, now, g.fetcher);
+      expect(g.asked).toHaveLength(1);
+    });
+
+    it("keeps serving in the grace period", async () => {
+      const g = await googleSays("IN_GRACE_PERIOD", now.getTime() + 5 * 60_000);
+      const { store } = memoryStore({ free: 1800, sub: lapsed });
+      expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(200);
+    });
+
+    it("refuses on account hold, and asks again only a day later", async () => {
+      const g = await googleSays("ON_HOLD", lapsed.expiry);
+      const { s, store } = memoryStore({ free: 1800, sub: lapsed });
+      const res = await handle(transcribe(10), g.e, store, now, g.fetcher);
+      expect(res.status).toBe(402);
+      expect(s.sub).toMatchObject({ state: "ON_HOLD", checked: now.getTime() });
+      await handle(transcribe(10), g.e, store, new Date(now.getTime() + DAY - 1), g.fetcher);
+      expect(g.asked).toHaveLength(1);
+      await handle(transcribe(10), g.e, store, new Date(now.getTime() + DAY), g.fetcher);
+      expect(g.asked).toHaveLength(2);
+    });
+
+    it("stops asking once Google says it expired or no longer knows it", async () => {
+      for (const [state, expiry] of [["EXPIRED", lapsed.expiry], ["CANCELED", lapsed.expiry], ["", null]] as const) {
+        const g = await googleSays(state, expiry);
+        const { s, store } = memoryStore({ free: 1800, sub: lapsed });
+        expect((await handle(transcribe(10), g.e, store, now, g.fetcher)).status).toBe(402);
+        await handle(transcribe(10), g.e, store, new Date(now.getTime() + 30 * DAY), g.fetcher);
+        expect(g.asked).toHaveLength(1);
+        expect(s.sub?.state).toBe(expiry == null ? "GONE" : state);
+      }
+    });
+
+    it("serves a canceled subscription until its paid month ends", async () => {
+      const g = await googleSays("CANCELED", later);
+      const { store } = memoryStore({ free: 1800 });
+      const res = await handle(new Request("https://example.com/v1/purchases", {
+        method: "POST", headers: { "X-Device-Id": device }, body: JSON.stringify({ product_id: "monthly", purchase_token: "sub" }),
+      }), g.e, store, now, g.fetcher);
+      expect(await res.json()).toEqual({ subscribed: true, out: false });
+    });
+
+    it("tries again on the next call when Google doesn't answer", async () => {
+      const g = await googleSays("ACTIVE", later);
+      let down = true;
+      const fetcher = (async (u: string, init?: RequestInit) => down && u.includes("subscriptionsv2")
+        ? new Response("busy", { status: 503 }) : g.fetcher(u, init)) as unknown as typeof fetch;
+      const { s, store } = memoryStore({ free: 1800, sub: lapsed });
+      expect((await handle(transcribe(10), g.e, store, now, fetcher)).status).toBe(402);
+      expect(s.sub?.checked).toBeUndefined();
+      down = false;
+      expect((await handle(transcribe(10), g.e, store, now, fetcher)).status).toBe(200);
+    });
+
+    it("re-checks before a Yiddish take too", async () => {
+      const g = await googleSays("ACTIVE", later);
+      const e = { ...g.e, DEVICE_TOKEN_SECRET: "secret" };
+      const { store } = memoryStore({ free: 1800, sub: lapsed });
+      expect(await yiddishCheck(e, store, device, await deviceToken("secret", device), now, null, g.fetcher)).toEqual({ ok: true });
+    });
   });
 
   describe("hours given on the Access page", () => {

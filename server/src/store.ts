@@ -14,8 +14,13 @@ export const DEFAULT_MODELS: Models = {
   paid: [{ id: "microsoft/mai-transcribe-2", per_hour: 0.1 }, { id: "openai/gpt-transcribe", per_hour: 0.27 }],
 };
 
-/** A Google Play subscription linked to the phone. [expiry] is the end of the paid month, in ms. */
-export interface Sub { token: string; product: string; expiry: number }
+/**
+ * A Google Play subscription linked to the phone. [expiry] is the end of the paid month, in ms.
+ * [state] is what Google said the last time this server asked (ACTIVE, IN_GRACE_PERIOD, ON_HOLD,
+ * CANCELED, EXPIRED, ..., or GONE when Google no longer knows the token), [checked] when it asked
+ * (ms). Both are null for rows saved before 2026-11-25.
+ */
+export interface Sub { token: string; product: string; expiry: number; state?: string | null; checked?: number | null }
 
 /**
  * Hours Isaac gave a person on his Access page, shared by every phone with its access code, or given to
@@ -69,7 +74,7 @@ export function d1Store(db: D1Database): Store {
         db.prepare("SELECT seconds FROM usage WHERE device = ? AND month = ?").bind(device, month),
         db.prepare("SELECT tier, models FROM models"),
         db.prepare(
-          "SELECT s.token, s.product, s.expiry, coalesce(u.seconds, 0) AS used FROM subscription_devices d " +
+          "SELECT s.token, s.product, s.expiry, s.state, s.checked, coalesce(u.seconds, 0) AS used FROM subscription_devices d " +
           "JOIN subscriptions s ON s.token = d.token " +
           "LEFT JOIN subscription_usage u ON u.token = s.token AND u.period = s.expiry " +
           "WHERE d.device = ? ORDER BY s.expiry DESC LIMIT 1").bind(device),
@@ -104,8 +109,9 @@ export function d1Store(db: D1Database): Store {
     },
     async saveSubscription(device, sub) {
       await db.batch([
-        db.prepare("INSERT INTO subscriptions (token, product, expiry) VALUES (?, ?, ?) " +
-          "ON CONFLICT (token) DO UPDATE SET product = excluded.product, expiry = excluded.expiry").bind(sub.token, sub.product, sub.expiry),
+        db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked) VALUES (?, ?, ?, ?, ?) " +
+          "ON CONFLICT (token) DO UPDATE SET product = excluded.product, expiry = excluded.expiry, state = excluded.state, " +
+          "checked = excluded.checked").bind(sub.token, sub.product, sub.expiry, sub.state ?? null, sub.checked ?? null),
         db.prepare("INSERT OR IGNORE INTO subscription_devices (device, token) VALUES (?, ?)").bind(device, sub.token),
       ]);
     },
