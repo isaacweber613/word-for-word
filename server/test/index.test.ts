@@ -54,12 +54,12 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
       if (bucket === "grant") s.grant!.used += seconds;
       else if (bucket === "free") s.free += seconds;
       else if (bucket === "sub") s.subUsed += seconds;
-      else s.credit = Math.max(0, s.credit - seconds);
+      else s.credit -= seconds;   // may stay below zero, as in D1; a top-up counts from zero
     },
     async saveSubscription(_d, sub) { s.sub = { ...sub, period: usagePeriod(s.sub?.token === sub.token ? s.sub : null, sub) }; },
     async addTopup(token, _d, seconds, at) {
       if (s.topups.has(token)) return false;
-      s.topups.set(token, { seconds, created: at, checked: null, voided: null }); s.credit += seconds; return true;
+      s.topups.set(token, { seconds, created: at, checked: null, voided: null }); s.credit = Math.max(0, s.credit) + seconds; return true;
     },
     async topupsChecked() {
       const counted = [...s.topups.values()].filter((t) => t.voided == null);

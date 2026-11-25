@@ -67,10 +67,16 @@ export interface Store {
    */
   reserve(device: string, month: string, bucket: Bucket, seconds: number, limit: number | null, sub: Sub | null,
           grant?: Grant | null): Promise<boolean>;
-  /** Adds [seconds] to what [bucket] used; a negative amount gives back part of what reserve held. */
+  /**
+   * Adds [seconds] to what [bucket] used; a negative amount gives back part of what reserve held. Bought hours can
+   * stay below zero after a recording started on their last seconds ran over; a top-up counts from zero (addTopup).
+   */
   charge(device: string, month: string, bucket: Bucket, seconds: number, sub: Sub | null, grant?: Grant | null): Promise<void>;
   saveSubscription(device: string, sub: Sub): Promise<void>;
-  /** Adds a bought top-up once. False when this purchase was already counted. */
+  /**
+   * Adds a bought top-up once, onto zero when the bought hours are below it, so going over on the last seconds is
+   * never a debt against it. False when this purchase was already counted.
+   */
   addTopup(token: string, device: string, seconds: number, now: number): Promise<boolean>;
   /**
    * When Google was last asked whether this phone's counted top-ups were refunded (the oldest of them;
@@ -186,7 +192,7 @@ export function d1Store(db: D1Database): Store {
         : bucket === "sub" && sub ? db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES (?1, ?2, ?3) " +
           "ON CONFLICT (token, period) DO UPDATE SET seconds = seconds + excluded.seconds WHERE subscription_usage.seconds < ?4")
           .bind(sub.token, sub.period ?? sub.expiry, seconds, limit)
-        // Bought hours may go below zero while held; charge settles them at zero or more, as before.
+        // Bought hours may go below zero while held, and after (charge, addTopup).
         : bucket === "credit" ? db.prepare("UPDATE credit SET seconds = seconds - ?1 WHERE device = ?2 AND seconds > 0").bind(seconds, device)
         : null;
       return !!held && ((await held.run()).meta.changes ?? 0) > 0;
@@ -196,7 +202,9 @@ export function d1Store(db: D1Database): Store {
       else if (bucket === "free") await add("usage", ["device", "month"], [device, month], seconds);
       else if (bucket === "sub" && sub) await add("subscription_usage", ["token", "period"], [sub.token, sub.period ?? sub.expiry], seconds);
       else if (bucket === "credit") {
-        await db.prepare("UPDATE credit SET seconds = max(0, seconds - ?) WHERE device = ?").bind(seconds, device).run();
+        // Not floored at zero here (Codex review of 52c15aa): another recording's hold may still be out in the same
+        // balance, and clipping it gave hours nobody bought once that recording was given back. addTopup floors.
+        await db.prepare("UPDATE credit SET seconds = seconds - ? WHERE device = ?").bind(seconds, device).run();
       }
     },
     async saveSubscription(device, sub) {
@@ -217,7 +225,7 @@ export function d1Store(db: D1Database): Store {
       const [counted] = await db.batch([
         db.prepare("INSERT OR IGNORE INTO topups (token, device, seconds, created_at) VALUES (?, ?, ?, ?)").bind(token, device, seconds, now),
         db.prepare("INSERT INTO credit (device, seconds) SELECT ?, ? WHERE changes() = 1 " +
-          "ON CONFLICT (device) DO UPDATE SET seconds = seconds + excluded.seconds").bind(device, seconds),
+          "ON CONFLICT (device) DO UPDATE SET seconds = max(0, seconds) + excluded.seconds").bind(device, seconds),
       ]);
       return (counted.meta.changes ?? 0) > 0;
     },
@@ -271,10 +279,10 @@ export function d1Store(db: D1Database): Store {
     async settleTake(take, seconds, job) {
       const t = await takeRow("take", take);
       if (!t || t.state !== "held") return false;
-      // Bought hours: never more than the hold and what is left (they end at zero, as charge does).
+      // Bought hours: never more than the hold and what nobody holds (a take holds only what is there, never below zero).
       const [moved] = await db.batch([
         db.prepare("UPDATE yiddish_takes SET state = 'charged', job = ?2, charged = CASE WHEN bucket = 'credit' " +
-          "THEN min(?1, held + coalesce((SELECT seconds FROM credit WHERE device = yiddish_takes.device), 0)) ELSE ?1 END " +
+          "THEN min(?1, held + max(0, coalesce((SELECT seconds FROM credit WHERE device = yiddish_takes.device), 0))) ELSE ?1 END " +
           "WHERE take = ?3 AND state = 'held'").bind(seconds, job, take),
         onTakeCounter(t, "charged - held"),
       ]);

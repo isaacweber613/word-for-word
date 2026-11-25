@@ -183,7 +183,9 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   every outside call goes to stand-ins, so no test can reach Google or OpenRouter). Fixed, each failing first:
   time was only checked before a recording and counted after it, so many recordings at once on a phone's, a
   code's or a subscription's last second were all typed; now each holds its estimated length first in one
-  conditional statement (`Store.reserve`) and OpenRouter's measured length replaces it afterwards. The phone's
+  conditional statement (`Store.reserve`) and OpenRouter's measured length replaces it afterwards. Bought hours a
+  recording on their last seconds ran over stay below zero until the next top-up, which counts from zero, so it is
+  never a debt (clipping them to zero at each recording gave back hours nobody bought when two overlapped). The phone's
   whole body went to OpenRouter on the server's key (provider routing, paid extras, a download link); now only
   the audio, its format (ogg or wav), language and the app's verbatim switches. A failed write could leave a
   bought top-up counted without its hours; now one transaction. A refund older than Google's 30-day list

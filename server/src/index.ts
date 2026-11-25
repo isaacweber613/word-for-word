@@ -611,10 +611,9 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   // given back. Saved after the answer goes back.
   const typed = status >= 200 && status < 300 && used;
   const charged = typed ? planSeconds(text, audio, format, used!, pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR) : 0;
-  // Bought hours held below zero end at zero (charge's floor) even when the estimate was exact.
-  if (charged !== estimate || pick.bucket === "credit") {
-    await later(store.charge(device, month, pick.bucket, charged - estimate, a.sub, a.grant));
-  }
+  // Bought hours held below zero stay there until the next top-up, which counts from zero (Store.addTopup): clipped to
+  // zero here, another recording's hold still out in them came back as hours nobody bought (Codex review of 52c15aa).
+  if (charged !== estimate) await later(store.charge(device, month, pick.bucket, charged - estimate, a.sub, a.grant));
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
 }
 

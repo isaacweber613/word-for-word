@@ -77,10 +77,57 @@ describe("a local run of the server", () => {
         expect(statuses).toEqual([200, 402, 402, 402, 402]);
         expect(openrouterCalls()).toHaveLength(1);
       }
-      // Bought hours end at zero, never below, once the one recording is settled.
-      expect(await server.eventually(async () => (await server.db.prepare("SELECT seconds FROM credit").first<{ seconds: number }>())!.seconds,
-        (s) => s === 0)).toBe(0);
+      // The one recording ran 59 s over the last bought second. That is never a debt: the next top-up adds all its
+      // 4 hours (the balance stays below zero until then, so another recording's hold in it can't be clipped away).
+      const credit = () => server.db.prepare("SELECT seconds FROM credit").first<{ seconds: number }>().then((r) => r!.seconds);
+      expect(await server.eventually(credit, (s) => s === -59)).toBe(-59);
+      await d1Store(server.db).addTopup("next-topup", deviceId(41), 4 * 3600, Date.now());
+      expect(await credit()).toBe(4 * 3600);
     });
+
+    it("makes no bought hours from two recordings at once on them, whichever starts or answers first", async () => {
+      // Codex's review of 52c15aa: 100 s left, two 60 s recordings held (-20), the first typed and settled (clipped to
+      // 0), the second not typed and given back: 60 s left instead of 40.
+      const now = Date.now(), period = now + 20 * DAY;
+      const credit = (d: string) => server.db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(d).first<{ seconds: number }>()
+        .then((r) => r!.seconds);
+      for (const [n, typedFirst] of [[44, true], [45, false]] as const) {
+        const d = deviceId(n);
+        await server.db.batch([
+          server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, 1800)").bind(d, month()),
+          server.db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES (?, 'monthly', ?, 'ACTIVE', ?, ?)")
+            .bind("s" + n, period, now, period),
+          server.db.prepare("INSERT INTO subscription_devices (device, token) VALUES (?, ?)").bind(d, "s" + n),
+          server.db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES (?, ?, 36000)").bind("s" + n, period),
+          server.db.prepare("INSERT INTO credit (device, seconds) VALUES (?, 100)").bind(d),
+        ]);
+        // Both are held before either answers. The 60 s one is typed and settled first; the 61 s one is not typed (every
+        // model busy) and is given back last.
+        let typedGo!: () => void, failedGo!: () => void;
+        const typedGate = new Promise<void>((r) => { typedGo = r; }), failedGate = new Promise<void>((r) => { failedGo = r; });
+        server.stand.openrouter = async (body) => {
+          if (Buffer.from((body.input_audio as { data: string }).data, "base64").length > 60.5 * 3000) {
+            await failedGate;
+            return Response.json({ error: { message: "busy" } }, { status: 503 });
+          }
+          await typedGate;
+          return Response.json({ text: "hi", usage: { seconds: 60, cost: 60 * 0.15 / 3600 } });
+        };
+        const send = (seconds: number) => server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body: recording(seconds) });
+        const first = send(typedFirst ? 60 : 61);
+        await server.eventually(async () => openrouterCalls().length, (c) => c >= 1);
+        const second = send(typedFirst ? 61 : 60);
+        await server.eventually(async () => openrouterCalls().length, (c) => c >= 2);
+        const [typed, failed] = typedFirst ? [first, second] : [second, first];
+        typedGo();
+        expect((await typed).status).toBe(200);
+        await new Promise((r) => setTimeout(r, 200));   // its count, which the server makes after answering
+        failedGo();
+        expect((await failed).status).toBe(503);
+        expect(await server.eventually(() => credit(d), (c) => c === 40)).toBe(40);
+        server.calls.length = 0;
+      }
+    }, 30_000);
 
     it("never refuses unlimited given hours", async () => {
       await server.db.prepare("INSERT INTO grants (id, who, code, seconds, created_at) VALUES (1, 'Me', 'K7QM4XPA9TRW', NULL, 0)").run();
