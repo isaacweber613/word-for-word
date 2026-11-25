@@ -172,7 +172,8 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   once (EXPIRED, often with the old expiry still ahead), and the app never sends a revoked purchase
   again, so a subscription that still looks paid is asked about once a day, after the answer has gone
   back (no slower call). EXPIRED, ON_HOLD, PAUSED and PENDING are never served, whatever the expiry,
-  per Google's subscription lifecycle page. A refunded top-up gives back what is left of its 4 hours,
+  per Google's subscription lifecycle page, and neither is one Google stopped knowing (410) while it did
+  not pay, stored as GONE with its old expiry. A refunded top-up gives back what is left of its 4 hours,
   never below zero: while a phone has bought hours left, the server asks Google's Voided Purchases API
   once a day, after the answer has gone back (Google lists refunded, canceled and charged-back one-time
   purchases there for 30 days; one answer covers every phone). Needs two new `topups` columns in D1
