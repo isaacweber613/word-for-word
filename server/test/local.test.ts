@@ -445,6 +445,134 @@ describe("a local run of the server", () => {
     });
   });
 
+  describe("a phone that hangs up before the answer (the app waits 70 s for it, or its connection drops)", () => {
+    // Review of 2026-11-25 (Fable, Gemini Neon): only the request itself, after OpenRouter answered, gave a recording's
+    // hold back or counted it. Cloudflare may stop a request's work once the phone has hung up, so the hold stayed,
+    // and the recording sent again was counted again.
+    const now = Date.now(), period = now + 20 * DAY;
+    /** A subscriber with [used] plan seconds of this paid month's 10 hours used (and the free minutes used up). */
+    async function subscriber(d: string, used: number) {
+      await server.db.batch([
+        server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, 1800)").bind(d, month()),
+        server.db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES (?, 'monthly', ?, 'ACTIVE', ?, ?)")
+          .bind("sub-" + d, period, now, period),
+        server.db.prepare("INSERT INTO subscription_devices (device, token) VALUES (?, ?)").bind(d, "sub-" + d),
+        server.db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES (?, ?, ?)").bind("sub-" + d, period, used),
+      ]);
+    }
+    const subUsed = (d: string) => server.db.prepare("SELECT seconds FROM subscription_usage WHERE token = ?").bind("sub-" + d)
+      .first<{ seconds: number }>().then((r) => r!.seconds);
+    /** OpenRouter answering every model only once the returned go() is called: typed, [measured] s long, or busy (null). */
+    function answerLater(measured: number | null) {
+      let go!: () => void;
+      const gate = new Promise<void>((r) => { go = r; });
+      server.stand.openrouter = async () => {
+        await gate;
+        return measured == null ? Response.json({ error: { message: "busy" } }, { status: 503 })
+          : Response.json({ text: "hi", usage: { seconds: measured, cost: measured * 0.15 / 3600 } });
+      };
+      return () => go();
+    }
+    const close = (want: number) => (s: number) => Math.abs(s - want) < 1e-6;
+
+    it("loses no time: the recording's work still ends, giving its hold back or counting what OpenRouter measured", async () => {
+      for (const [n, measured] of [[60, null], [61, 20]] as const) {
+        const d = deviceId(n);
+        await subscriber(d, 1000);
+        const go = answerLater(measured);
+        const sent = server.hangUp("/v1/transcriptions", { headers: phone(d), body: recording(30) }, 1500);
+        await server.eventually(async () => openrouterCalls().length, (c) => c >= 1);
+        expect(await subUsed(d)).toBe(1030);   // held before it went out
+        expect((await sent).status).toBe(499);   // the phone hung up before OpenRouter answered
+        await new Promise((r) => setTimeout(r, 300));
+        go();
+        // Not typed: the 30 s held come back. Typed: the 20 s OpenRouter measured, in place of the 30 s held.
+        const want = measured == null ? 1000 : 1020;
+        expect(await server.eventually(() => subUsed(d), close(want))).toBeCloseTo(want, 6);
+        server.calls.length = 0;
+      }
+    }, 30_000);
+
+    it("gives a hold no request can still settle back on the phone's next request, and counts a late answer once", async () => {
+      // For work Cloudflare stops anyway: its docs promise waitUntil only up to 30 s after the phone hangs up, and a crash
+      // or a restart can stop it sooner. A hold older than the app's 70 s wait and those 30 s is given back.
+      for (const [n, measured] of [[62, 20], [63, null]] as const) {
+        const d = deviceId(n);
+        await subscriber(d, 1000);
+        const go = answerLater(measured);
+        const sent = server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body: recording(30) });
+        await server.eventually(async () => openrouterCalls().length, (c) => c >= 1);
+        const age = (ms: number) => server.db.prepare("UPDATE recording_holds SET created_at = created_at - ? WHERE device = ?").bind(ms, d).run();
+        const usage = async () => expect((await server.fetch("/v1/usage", { headers: phone(d) })).status).toBe(200);
+        // Younger than that, it stays: its request may still be running.
+        await age(95_000);
+        await usage();
+        expect(await subUsed(d)).toBe(1030);
+        // Older: given back on the phone's next request, once.
+        await age(6_000);
+        for (let i = 0; i < 2; i++) {
+          await usage();
+          expect(await subUsed(d)).toBe(1000);
+        }
+        // This request was only slow (a hand-made one that kept waiting): what was typed counts all of it, once.
+        go();
+        expect((await sent).status).toBe(measured == null ? 503 : 200);
+        const settled = () => server.db.prepare("SELECT count(*) AS n FROM recording_holds WHERE device = ?").bind(d).first<{ n: number }>()
+          .then((r) => r!.n);
+        expect(await server.eventually(settled, (c) => c === 0)).toBe(0);
+        const want = measured == null ? 1000 : 1020;
+        expect(await subUsed(d)).toBeCloseTo(want, 6);
+        await usage();
+        expect(await subUsed(d)).toBeCloseTo(want, 6);
+        server.calls.length = 0;
+      }
+    }, 30_000);
+
+    it("gives expired holds back once on every kind of hours, and leaves younger ones alone", async () => {
+      const d = deviceId(64), m = month(), old = now - 101_000;
+      const hold = (id: string, bucket: string, held: number, at: number, extra: [number | null, string | null, number | null] = [null, null, null]) =>
+        server.db.prepare("INSERT INTO recording_holds (id, device, month, bucket, grant_id, sub_token, sub_period, held, state, created_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'held', ?)").bind(id, d, m, bucket, ...extra, held, at);
+      await server.db.batch([
+        server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, 100)").bind(d, m),
+        server.db.prepare("INSERT INTO grants (id, who, code, seconds, created_at) VALUES (3, 'Friend', 'K7QM4XPA9TRY', 3600, 0)"),
+        server.db.prepare("INSERT INTO grant_usage (grant_id, month, seconds) VALUES (3, ?, 50)").bind(m),
+        server.db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES ('s64', 'monthly', ?, 'ACTIVE', ?, ?)")
+          .bind(period, now, period),
+        server.db.prepare("INSERT INTO subscription_devices (device, token) VALUES (?, 's64')").bind(d),
+        server.db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES ('s64', ?, 70)").bind(period),
+        server.db.prepare("INSERT INTO credit (device, seconds) VALUES (?, 8)").bind(d),
+        hold("h1", "free", 22, old), hold("h2", "grant", 10, old, [3, null, null]),
+        hold("h3", "sub", 22, old, [null, "s64", period]), hold("h4", "credit", 22, old), hold("h5", "free", 6, Date.now()),
+      ]);
+      const counters = async () => [
+        (await server.db.prepare("SELECT seconds FROM usage WHERE device = ?").bind(d).first<{ seconds: number }>())!.seconds,
+        (await server.db.prepare("SELECT seconds FROM grant_usage WHERE grant_id = 3").first<{ seconds: number }>())!.seconds,
+        (await server.db.prepare("SELECT seconds FROM subscription_usage WHERE token = 's64'").first<{ seconds: number }>())!.seconds,
+        (await server.db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(d).first<{ seconds: number }>())!.seconds,
+      ];
+      for (let i = 0; i < 2; i++) {
+        expect((await server.fetch("/v1/usage", { headers: phone(d) })).status).toBe(200);
+        expect(await counters()).toEqual([78, 40, 48, 30]);
+      }
+      const states = await server.db.prepare("SELECT state FROM recording_holds WHERE device = ? ORDER BY id").bind(d).all<{ state: string }>();
+      expect(states.results.map((r) => r.state)).toEqual(["expired", "expired", "expired", "expired", "held"]);
+    });
+
+    it("holds and counts recordings as before when the recording_holds table isn't there yet", async () => {
+      const d = deviceId(65);
+      await server.db.prepare("DROP TABLE recording_holds").run();
+      try {
+        expect((await server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body: recording(30) })).status).toBe(200);
+        const used = () => server.db.prepare("SELECT seconds FROM usage WHERE device = ?").bind(d).first<{ seconds: number }>().then((r) => r!.seconds);
+        expect(await server.eventually(used, close(10))).toBeCloseTo(10, 6);   // what the stand-in measured, in place of 30
+      } finally {
+        const schema = readFileSync(new URL("../schema.sql", import.meta.url), "utf8");
+        for (const s of schema.match(/CREATE (TABLE|INDEX) IF NOT EXISTS recording_holds[^;]+/g)!) await server.db.prepare(s).run();
+      }
+    });
+  });
+
   describe("someone who wants to cost Isaac money", () => {
     it("sends OpenRouter only what the app itself sends, whatever else a phone puts in the body", async () => {
       const d = deviceId(3);

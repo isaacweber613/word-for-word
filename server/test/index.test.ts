@@ -5,7 +5,8 @@ import {
 } from "../src/index";
 import { oggOpus, wav, withSyncs } from "./audio";
 import { sqliteD1 } from "./sqlite-d1";
-import { d1Store, DEFAULT_MODELS, usagePeriod, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
+import { d1Store, DEFAULT_MODELS, usagePeriod, type Account, type FailedCheck, type Grant, type Hold, type Models, type Store,
+  type Sub } from "../src/store";
 
 const device = "a".repeat(64);
 const env = { OPENROUTER_KEY: "test-key", FREE_SECONDS_PER_MONTH: "1800" } as Env;
@@ -26,6 +27,8 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
     // Plan seconds per paid month (subscription_usage), keyed like the D1 store.
     usage: new Map<number, number>(init.sub ? [[init.sub.period ?? init.sub.expiry, init.subUsed ?? 0]] : []),
     failed: new Map<string, FailedCheck & { count: number }>(),
+    // Holds already counted (settle counts each once, as in D1).
+    settled: new Set<string>(),
   };
   const store: Store = {
     async account(d, _m, code): Promise<Account> {
@@ -33,7 +36,8 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
         ? { id: 1, who: s.grant.who, seconds: s.grant.seconds, used: s.grant.used, device: s.grant.device ?? null } : null;
       return { freeUsed: s.free, grant: g, models: s.models, sub: s.sub ? { ...s.sub, used: s.usage.get(s.sub.period ?? s.sub.expiry) ?? 0 } : null, credit: s.credit };
     },
-    async reserve(_d, _m, bucket: Bucket, seconds, limit, sub) {
+    async reserve(h: Hold, limit) {
+      const { bucket, seconds, sub } = h;
       if (bucket === "grant") {
         if (!s.grant || (limit != null && s.grant.used >= limit)) return false;
         s.grant.used += seconds;
@@ -51,7 +55,12 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
       }
       return true;
     },
-    async charge(_d, _m, bucket: Bucket, seconds, sub) {
+    async settle(h, seconds) {
+      if (s.settled.has(h.id)) return;
+      s.settled.add(h.id);
+      await store.charge(h.device, h.month, h.bucket, seconds - h.seconds, h.sub, h.grant);
+    },
+    async charge(_d, _m, bucket, seconds, sub) {
       if (bucket === "sub" && sub) s.usage.set(sub.period ?? sub.expiry, (s.usage.get(sub.period ?? sub.expiry) ?? 0) + seconds);
       if (bucket === "grant") s.grant!.used += seconds;
       else if (bucket === "free") s.free += seconds;

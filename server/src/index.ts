@@ -18,7 +18,8 @@
  *
  * Each recording holds its length, read from the audio itself (audioLength), on what pays for it before it is
  * sent (Store.reserve), so many recordings at once can't all pass on the same last second; OpenRouter's measured
- * length replaces it afterwards. OpenRouter gets only what the app sends (forwardedBody). Optional limits,
+ * length replaces it afterwards, in work that goes on after the phone hangs up, and a hold that work never settled is
+ * given back (RECORDING_RUNS_MS). OpenRouter gets only what the app sends (forwardedBody). Optional limits,
  * all off until set (review, 2026-11-25): OPENROUTER_PAID_KEY, a key just for phones that pay, so free
  * or given use reaching OPENROUTER_KEY's limit doesn't stop them; MAX_RECORDING_SECONDS; and the rate
  * limits DEVICE_LIMITER (recordings and purchases per phone) and ADDRESS_LIMITER (phone checks per address).
@@ -63,7 +64,8 @@
 
 import { decodeIntegrity, PACKAGE, productState, verify, VOIDED_WINDOW_MS, voidedPurchases, type IntegrityPayload,
   type Verified } from "./google";
-import { d1Store, usagePeriod, type Account, type Bucket, type Grant, type ModelChoice, type Store, type Sub } from "./store";
+import { d1Store, noTable, usagePeriod, type Account, type Bucket, type Grant, type Hold, type ModelChoice, type StaleBefore,
+  type Store, type Sub } from "./store";
 
 export interface Env {
   DB: D1Database;
@@ -586,7 +588,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   const code = accessCode(request.headers.get("X-Access-Code"));
   // Loaded before the device check: a valid access code stands in for a device token.
   let account = device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)
-    ? await store.account(device, month, code, now.getTime() - TAKE_RUNS_MS) : null;
+    ? await store.account(device, month, code, staleBefore(now)) : null;
   // Without a device token, given hours (a code's or the phone's own) still work, but only they do.
   let grantOnly = false;
   if (device && account) {
@@ -662,12 +664,17 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   const a = account ?? await store.account(device, month, code);
   // Holds the recording's length on what pays, in one statement that refuses once nothing is left, before the audio
   // goes out (review, 2026-11-25: the time was only checked before and counted after, so many recordings sent at
-  // once on a phone's, a code's or a subscription's last second were all typed and paid for by Isaac).
-  let pick: { bucket: Bucket; paid: boolean } | null = null;
+  // once on a phone's, a code's or a subscription's last second were all typed and paid for by Isaac). The hold is
+  // also a row (table recording_holds), given back if no work ever settles it (RECORDING_RUNS_MS).
+  // Its time is when it is held, after the upload, when the app's 70 s wait for the answer starts.
+  const id = crypto.randomUUID(), at = Date.now();
+  let pick: { bucket: Bucket; paid: boolean } | null = null, hold: Hold | null = null;
   for (const p of choices(a, now.getTime(), free, grantOnly)) {
-    if (await store.reserve(device, month, p.bucket, length, limitOf(p.bucket, a, free), a.sub, a.grant)) { pick = p; break; }
+    const h: Hold = { id, device, month, bucket: p.bucket, seconds: length, sub: a.sub, grant: a.grant, at };
+    if (await store.reserve(h, limitOf(p.bucket, a, free))) { pick = p; hold = h; break; }
   }
-  if (!pick) return outOfTime(a, now.getTime(), free);
+  if (!pick || !hold) return outOfTime(a, now.getTime(), free);
+  const held: Hold = hold, models = pick.paid ? a.models.paid : a.models.free;
 
   const key = env.OPENROUTER_PAID_KEY && !grantOnly && subscribed(a.sub, now.getTime()) ? env.OPENROUTER_PAID_KEY : env.OPENROUTER_KEY;
   const send = (b: object) => fetcher(OPENROUTER_URL, {
@@ -677,37 +684,61 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   });
 
   // The main model, then each backup when the one before is missing, busy or down.
-  let status = 502, text = JSON.stringify({ error: { message: "No model answered." } }), used: ModelChoice | null = null;
-  try {
-    for (const model of pick.paid ? a.models.paid : a.models.free) {
-      let b = forwardedBody(body, audio, format, model.id);
-      let res = await send(b);
-      text = await res.text();
-      if ("language" in b && (res.status === 400 || res.status === 422) && !text.includes("does not exist")) {
-        // The model refused the language: send again and let it guess.
-        const { language: _drop, ...rest } = b;
-        b = rest;
-        res = await send(b);
+  const answer = (async () => {
+    let status = 502, text = JSON.stringify({ error: { message: "No model answered." } }), used: ModelChoice | null = null;
+    try {
+      for (const model of models) {
+        let b = forwardedBody(body, audio, format, model.id);
+        let res = await send(b);
         text = await res.text();
+        if ("language" in b && (res.status === 400 || res.status === 422) && !text.includes("does not exist")) {
+          // The model refused the language: send again and let it guess.
+          const { language: _drop, ...rest } = b;
+          b = rest;
+          res = await send(b);
+          text = await res.text();
+        }
+        status = res.status;
+        used = model;
+        if (res.ok || !tryAnother(res.status, text)) break;
       }
-      status = res.status;
-      used = model;
-      if (res.ok || !tryAnother(res.status, text)) break;
+    } catch (e) {
+      console.error("OpenRouter couldn't be reached:", e instanceof Error ? e.message : String(e));
+      status = 502;
+      text = JSON.stringify({ error: { message: "No model answered." } });
     }
-  } catch (e) {
-    console.error("OpenRouter couldn't be reached:", e instanceof Error ? e.message : String(e));
-    status = 502;
-    text = JSON.stringify({ error: { message: "No model answered." } });
-  }
-
-  // Only audio that came back as text counts: the length held becomes what OpenRouter measured, or is
-  // given back. Saved after the answer goes back.
-  const typed = status >= 200 && status < 300 && used;
-  const charged = typed ? planSeconds(text, length, used!, pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR) : 0;
-  // Bought hours held below zero stay there until the next top-up, which counts from zero (Store.addTopup): clipped to
-  // zero here, another recording's hold still out in them came back as hours nobody bought (Codex review of 52c15aa).
-  if (charged !== length) await later(store.charge(device, month, pick.bucket, charged - length, a.sub, a.grant));
+    return { status, text, used };
+  })();
+  // OpenRouter and then the hold's count, handed to Cloudflare as one piece of work right after the hold (ctx.waitUntil),
+  // so it ends even when the phone hangs up first (review, 2026-11-25: the app hangs up after 70 s without an answer or
+  // when its connection drops, Cloudflare may then stop the request's own work, and the hold stayed, so the recording
+  // sent again was counted again). Cloudflare's docs (Context, waitUntil; Limits, Duration; read 2026-11-25): waitUntil
+  // runs up to 30 s after the answer is sent or the phone hangs up, and a crash, resource pressure or a shutdown can stop
+  // it sooner, so a hold no work settled is given back later (RECORDING_RUNS_MS). Only audio that came back as text
+  // counts: the length held becomes what OpenRouter measured, or is given back, after the answer goes back.
+  await later(answer.then(async ({ status, text, used }) => {
+    const typed = status >= 200 && status < 300 ? used : null;
+    const charged = typed ? planSeconds(text, length, typed, held.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR) : 0;
+    // Bought hours held below zero stay there until the next top-up, which counts from zero (Store.addTopup): clipped to
+    // zero here, another recording's hold still out in them came back as hours nobody bought (Codex review of 52c15aa).
+    await store.settle(held, charged);
+  }));
+  const { status, text, used } = await answer;
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
+}
+
+/**
+ * How long a recording's request can still be running after its hold (ms): the app waits 70 s for the answer
+ * (TranscriberClient.kt, readTimeout) and then hangs up, and Cloudflare gives the work handed to ctx.waitUntil up to 30 s
+ * after that. A hold older than this that no work settled (Cloudflare stopped it: a crash, a restart) is given back on
+ * the phone's next request (review, 2026-11-25: the phone lost that time, and the recording sent again was counted
+ * again). An answer that still comes (a hand-made request that kept waiting) is counted once, all of it (Store.settle).
+ */
+export const RECORDING_RUNS_MS = (70 + 30) * 1000;
+
+/** The times before which the phone's holds whose work never ended are given back (Store.account). */
+function staleBefore(now: Date): StaleBefore {
+  return { takes: now.getTime() - TAKE_RUNS_MS, recordings: now.getTime() - RECORDING_RUNS_MS };
 }
 
 /** How many plan seconds a second of Yiddish audio counts for (AGENTS.local.md). */
@@ -725,9 +756,6 @@ export const TAKE_RUNS_MS = (180 + 30) * 1000;
 
 /** [held]: seconds of sound the take's hold covers (only when it was held), the most the model server may type. */
 export type CheckAnswer = { ok: true; held?: number } | { ok: false; status: number; code: string; message: string };
-
-/** D1's error for a table that isn't there yet (yiddish_takes is added by hand before a deploy, schema.sql). */
-const noTable = (e: unknown) => /no such table/i.test(String((e as Error | null)?.message ?? e));
 
 /**
  * Whether the app's Yiddish take may go to the Yiddish model (Isaac, 2026-11-24: "I don't want
@@ -757,8 +785,7 @@ export async function yiddishCheck(env: Env, store: Store, device: unknown, toke
     return { ok: false, status: 400, code: "no_device", message: "Missing device ID." };
   }
   const free = Number(env.FREE_SECONDS_PER_MONTH);
-  let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null),
-                              now.getTime() - TAKE_RUNS_MS);
+  let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null), staleBefore(now));
   const vouched = typeof token === "string" && !!env.DEVICE_TOKEN_SECRET && await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token);
   if (vouched) {
     a = await refreshed(a, env, store, device, now.getTime(), fetcher, defer);

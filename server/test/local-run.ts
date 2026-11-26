@@ -34,7 +34,7 @@ function schemaStatements(): string[] {
 }
 
 export const TABLES = ["usage", "models", "subscriptions", "subscription_devices", "subscription_usage", "credit",
-  "topups", "grants", "grant_usage", "failed_checks", "yiddish_takes"];
+  "topups", "grants", "grant_usage", "failed_checks", "yiddish_takes", "recording_holds"];
 
 /** What the stand-ins answer. Each test sets what it needs; the rest answer like a quiet, working service. */
 export interface StandIns {
@@ -69,6 +69,12 @@ export interface LocalServer {
   calls: Call[];
   /** A request to the server, as the app sends it. */
   fetch(path: string, init?: { method?: string; headers?: Record<string, string>; body?: unknown }): Promise<Response>;
+  /**
+   * A recording sent by a phone that hangs up [ms] after sending it, as the app does after 70 s without an answer: the
+   * stand-in phone is another Worker, whose call to the server is dropped then, so the runtime treats the server's work
+   * for it as Cloudflare treats a phone that has gone. Answers 499 once it has hung up.
+   */
+  hangUp(path: string, init: { headers: Record<string, string>; body: unknown }, ms: number): Promise<Response>;
   /** The Yiddish entrypoint (worker.ts), called the way the yiddishtry Worker calls it through its service binding. */
   yiddish(method: "check" | "charge" | "release" | "refund", ...args: unknown[]): Promise<unknown>;
   /** Empties every table and the list of calls, and puts the stand-ins back to their defaults. */
@@ -138,6 +144,15 @@ export async function startLocal(vars: Record<string, string> = {}, extra: Recor
     serviceBindings: { WFW: { name: "word-for-word", entrypoint: "Yiddish" } },
     script: "export default { async fetch(request, env) { const { method, args } = await request.json(); " +
       "return Response.json((await env.WFW[method](...args)) ?? null); } }",
+  }, {
+    // The phone that hangs up (hangUp): it forwards the request and drops it after x-hang-up-ms.
+    name: "phone",
+    modules: true,
+    compatibilityDate: "2026-11-01",
+    serviceBindings: { WFW: "word-for-word" },
+    script: "export default { async fetch(request, env) { const gone = new AbortController(); " +
+      "setTimeout(() => gone.abort(), Number(request.headers.get('x-hang-up-ms'))); " +
+      "try { return await env.WFW.fetch(request, { signal: gone.signal }); } catch { return new Response('hung up', { status: 499 }); } } }",
   }, ...others] } as Parameters<typeof convertV4MiniflareOptions>[0]));
   const db = await mf.getD1Database("DB") as unknown as D1Database;
   for (const s of schemaStatements()) await db.prepare(s).run();
@@ -150,6 +165,12 @@ export async function startLocal(vars: Record<string, string> = {}, extra: Recor
       });
       // Back to Node's own Response, so tests read it like any other.
       return new Response(await res.text(), { status: res.status, headers: Object.fromEntries(res.headers) });
+    },
+    async hangUp(path, init, ms) {
+      const phoneWorker = await mf.getWorker("phone");
+      const res = await phoneWorker.fetch("https://word-for-word.local" + path, { method: "POST",
+        headers: { ...init.headers, "x-hang-up-ms": String(ms) }, body: JSON.stringify(init.body) });
+      return new Response(await res.text(), { status: res.status });
     },
     async yiddish(method, ...args) {
       const caller = await mf.getWorker("yiddish-caller");

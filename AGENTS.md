@@ -183,7 +183,13 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   every outside call goes to stand-ins, so no test can reach Google or OpenRouter). Fixed, each failing first:
   time was only checked before a recording and counted after it, so many recordings at once on a phone's, a
   code's or a subscription's last second were all typed; now each holds its length first in one
-  conditional statement (`Store.reserve`) and OpenRouter's measured length replaces it afterwards. The length is read from
+  conditional statement (`Store.reserve`) and OpenRouter's measured length replaces it afterwards. OpenRouter's call and
+  that count are one piece of work handed to `ctx.waitUntil` right after the hold (fourth review, Fable and Gemini Neon:
+  only the request itself counted it, so a phone that hung up, after the app's 70 s wait or a dropped connection, kept
+  the hold, and the recording sent again was counted again). Cloudflare's docs give that work up to 30 s after the
+  hang-up and say a crash or a restart can stop it sooner, so each hold is also a row (`recording_holds`), given back on
+  the phone's next request once older than 100 s (`RECORDING_RUNS_MS`); an answer that still comes is counted once,
+  all of it. The table goes into D1 before the deploy; without it recordings are held and counted as before. The length is read from
   the audio itself (`audioLength`: the Opus packets of the app's Ogg, or the app's 44-byte 16 kHz WAV without S/PDIF
   bursts, which ffmpeg plays as compressed sound, 15 s in a file whose size says 2.1 s; anything else is
   refused with 400, and the app sends a refused Ogg again as WAV), not guessed from the size: Opus can be far smaller per
