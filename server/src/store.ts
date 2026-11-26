@@ -70,8 +70,9 @@ export interface Store {
    */
   topupsChecked(device: string): Promise<number | null>;
   /**
-   * Takes back what is left of each voided top-up's hours from its phone, never below zero, once per
-   * top-up; every top-up still counted is then checked as of [now]. Answers how many were taken back.
+   * Takes back what is left of each voided top-up's own hours from its phone (the oldest bought hours used first),
+   * never below zero, once per top-up; every top-up still counted is then checked as of [now]. Answers how many were
+   * taken back.
    */
   takeBackTopups(voided: string[], now: number): Promise<number>;
   /** Saves a failed check on the Failed checks list, counting each report. */
@@ -156,10 +157,16 @@ export function d1Store(db: D1Database): Store {
     },
     async takeBackTopups(voided, now) {
       // One transaction: a top-up already taken back, or one this server never counted, changes nothing.
+      // What is left of the refunded top-up itself, with the oldest bought hours used first: the phone's balance less the
+      // top-ups bought after it, never more than its own hours or below zero (third review, 2026-11-25: its whole 4 hours
+      // came off the balance, so a top-up used up and then refunded took the hours of one bought after it).
       const results = await db.batch([
         ...voided.flatMap((token) => [
-          db.prepare("UPDATE credit SET seconds = max(0, seconds - (SELECT seconds FROM topups WHERE token = ? AND voided IS NULL)) " +
-            "WHERE device = (SELECT device FROM topups WHERE token = ? AND voided IS NULL)").bind(token, token),
+          db.prepare("UPDATE credit SET seconds = seconds - min((SELECT seconds FROM topups WHERE token = ?1 AND voided IS NULL), " +
+            "max(0, seconds - (SELECT coalesce(sum(t.seconds), 0) FROM topups t JOIN topups v ON v.token = ?1 " +
+            "WHERE t.device = v.device AND t.voided IS NULL AND t.token != v.token AND " +
+            "(t.created_at > v.created_at OR (t.created_at = v.created_at AND t.token > v.token))))) " +
+            "WHERE device = (SELECT device FROM topups WHERE token = ?1 AND voided IS NULL)").bind(token),
           db.prepare("UPDATE topups SET voided = ? WHERE token = ? AND voided IS NULL").bind(now, token),
         ]),
         db.prepare("UPDATE topups SET checked = ? WHERE voided IS NULL").bind(now),
