@@ -13,7 +13,7 @@ import { fileURLToPath } from "node:url";
 import { convertV4MiniflareOptions, Miniflare, Response as MfResponse } from "miniflare";
 import { oggOpus } from "./audio";
 
-export { oggOpus, wav } from "./audio";
+export { oggOpus, wav, withSyncs } from "./audio";
 
 const SERVER = fileURLToPath(new URL("..", import.meta.url));
 

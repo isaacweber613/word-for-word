@@ -47,7 +47,7 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-interface StandIn { proc: ChildProcess; port: number; typed: number[]; knowsLimit: boolean }
+interface StandIn { proc: ChildProcess; port: number; typed: number[] }
 /** A stand-in model server running [serverPy]'s request handling; resolves once it listens. */
 async function startStandIn(serverPy: string, secretFile: string): Promise<StandIn> {
   const port = await freePort();
@@ -63,7 +63,7 @@ async function startStandIn(serverPy: string, secretFile: string): Promise<Stand
         out = out.slice(i + 1);
         const m = line.match(/^typed ([\d.]+)/);
         if (m) typed.push(Number(m[1]));
-        if (line.startsWith("stand-in model server on")) resolve({ proc, port, typed, knowsLimit: line.includes("x-max-seconds known: True") });
+        if (line.startsWith("stand-in model server on")) resolve({ proc, port, typed });
       }
     });
     proc.on("exit", (code) => reject(new Error(`stand-in model server ended (${code}): ${err.slice(-500)}`)));
@@ -189,23 +189,20 @@ describe.skipIf(!WORKER || !STANDIN || !CLOUD_PY || !PC_PY)("Yiddish takes throu
     expect(await settled(d)).toBe(1795);
   });
 
-  it("a take whose header says it is a hundred times shorter is counted the length the model server measured", async () => {
+  it("a take that is not the app's own WAV is refused by the Worker before any model server sees it, nothing counted", async () => {
+    // Review 2026-11-25: each reads other than its size says (a made-up byte rate, 8 kHz, or the app's header over S/PDIF
+    // bursts, which ffmpeg plays as the compressed sound in them), so its hold, from its size, was not its length.
     const d = deviceId(3);
     await freeLeft(d, 1800);
-    expect((await take(d, wav(10, { byteRate: 3_200_000 }))).status).toBe(200);
-    expect(cloud.typed).toEqual([10]);
-    expect(await settled(d)).toBe(20);
-  });
-
-  it("a take longer than its size says is refused by the cloud copy before it is typed, and gives its hold back", async () => {
-    const d = deviceId(4);
-    await freeLeft(d, 1800);
-    // 8 kHz: 10 s of sound in the size of 5 s at the app's 16 kHz, so the hold covers 6 s.
-    const res = await take(d, wav(10, { rate: 8000 }));
-    expect(cloud.knowsLimit).toBe(true);
-    expect(res.status).toBe(402);
+    const spdif = wav(10);
+    for (const at of [0, 6144]) spdif.set([0x72, 0xf8, 0x1f, 0x4e], 44 + at);
+    for (const body of [wav(10, { byteRate: 3_200_000 }), wav(10, { rate: 8000 }), spdif]) {
+      const res = await take(d, body);
+      expect(res.status).toBe(400);
+      expect((await res.json() as { code: string }).code).toBe("not_app_audio");
+    }
+    expect(sent).toEqual([]);
     expect(cloud.typed).toHaveLength(0);
-    expect(sent.map((s) => s.limit)).toEqual(["6"]);
     expect(await settled(d)).toBe(0);
   });
 
@@ -246,15 +243,5 @@ describe.skipIf(!WORKER || !STANDIN || !CLOUD_PY || !PC_PY)("Yiddish takes throu
     expect(sent).toEqual([{ to: "pc", path: "/", limit: "11" }]);
     expect(pc.typed).toEqual([10]);
     expect(await settled(d)).toBe(20);
-    // A take longer than its size says: the PC's server.py refuses it once it knows x-max-seconds (yiddish-stt PR 2);
-    // before that it types it, and it is counted all of what the PC measured.
-    const res = await take(d, wav(10, { rate: 8000 }));
-    if (pc.knowsLimit) {
-      expect(res.status).toBe(402);
-      expect(await settled(d)).toBe(20);
-    } else {
-      expect(res.status).toBe(200);
-      expect(await settled(d)).toBe(40);
-    }
   });
 });

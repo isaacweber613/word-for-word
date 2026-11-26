@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { d1Store } from "../src/store";
-import { deviceId, deviceToken, oggOpus, phone, recording, recordingOf, startLocal, wav, type LocalServer } from "./local-run";
+import { deviceId, deviceToken, oggOpus, phone, recording, recordingOf, startLocal, wav, withSyncs, type LocalServer } from "./local-run";
 
 const month = () => new Date().toISOString().slice(0, 7);
 const DAY = 24 * 3600_000;
@@ -60,10 +60,12 @@ describe("a local run of the server", () => {
     });
 
     it("sends OpenRouter only the app's own two kinds of audio", async () => {
-      // A WAV whose header says 8 kHz holds twice the sound its size says at the app's 16 kHz; bytes that aren't one Ogg
-      // Opus stream (another codec, or another file after it) have no length this server can know before sending them.
+      // A WAV whose header says 8 kHz holds twice the sound its size says at the app's 16 kHz, and the app's header over
+      // S/PDIF bursts of compressed sound far more; bytes that aren't one Ogg Opus stream (another codec, or another file
+      // after it) have no length this server can know before sending them.
       const d = deviceId(6);
-      for (const body of [recordingOf(wav(10, 8000), "wav"), recordingOf(Buffer.alloc(30000, 1)),
+      for (const body of [recordingOf(wav(10, 8000), "wav"), recordingOf(withSyncs(wav(10), 0, 6144), "wav"),
+        recordingOf(Buffer.alloc(30000, 1)),
         recordingOf(Buffer.concat([oggOpus(1), Buffer.alloc(3000, 1)])), recordingOf(oggOpus(10), "wav")]) {
         expect((await server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body })).status).toBe(400);
       }

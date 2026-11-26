@@ -64,3 +64,13 @@ export function wav(seconds: number, rate = 16000): Buffer {
   b.write("data", 36); b.writeUInt32LE(n * 2, 40);
   return b;
 }
+
+/**
+ * [audio] (a WAV) with the 4 bytes that start an S/PDIF burst (IEC 61937 sync words Pa, Pb) at each of [at] in its sound.
+ * Twice in a PCM WAV's first 64 KB of sound, ffmpeg plays the bursts as the compressed sound in them.
+ */
+export function withSyncs(audio: Buffer, ...at: number[]): Buffer {
+  const b = Buffer.from(audio);
+  for (const i of at) b.set([0x72, 0xf8, 0x1f, 0x4e], 44 + i);
+  return b;
+}

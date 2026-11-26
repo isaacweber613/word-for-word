@@ -3,7 +3,7 @@ import {
   accessCode, audioLength, audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS,
   yiddishCharge, yiddishCheck, type Env,
 } from "../src/index";
-import { oggOpus, wav } from "./audio";
+import { oggOpus, wav, withSyncs } from "./audio";
 import { sqliteD1 } from "./sqlite-d1";
 import { d1Store, DEFAULT_MODELS, usagePeriod, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
 
@@ -123,6 +123,17 @@ describe("transcription server", () => {
     expect(audioLength(oggOpus(10).toString("base64"), "wav")).toBeNull();
     expect(audioLength(wav(10, 8000).toString("base64"), "wav")).toBeNull();
     expect(audioLength(" " + audio(10), "wav")).toBeNull();
+  });
+
+  it("takes only the app's own plain WAV, so its size is its length (review 2026-11-25)", () => {
+    // The app's header over S/PDIF bursts of compressed sound: ffmpeg played 15 s of sound in a file whose size says 2.1 s.
+    expect(audioLength(withSyncs(wav(10), 0, 6144).toString("base64"), "wav")).toBeNull();
+    const madeUp = wav(10);
+    madeUp.writeUInt32LE(3_200_000, 28);   // a byte rate the app never writes
+    expect(audioLength(madeUp.toString("base64"), "wav")).toBeNull();
+    // One such start by chance in a real recording changes nothing.
+    expect(audioLength(withSyncs(wav(10), 3000).toString("base64"), "wav")).toBe(10);
+    expect(audioLength(withSyncs(wav(10), 0, 70000).toString("base64"), "wav")).toBe(10);   // past ffmpeg's first 64 KB
   });
 
   it("counts compressed audio by the seconds OpenRouter reports", () => {

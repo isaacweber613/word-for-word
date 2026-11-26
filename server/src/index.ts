@@ -137,11 +137,18 @@ const u32At = (b: Bytes, at: number) => (u16At(b, at) | u16At(b, at + 2) << 16) 
 /**
  * Seconds of sound in the app's own WAV (WavWriter): a 44-byte header for one channel of 16-bit PCM at 16,000 samples a
  * second, 32,000 bytes a second after it. Null for any other WAV, whose sound can be longer than its size says (a
- * header saying 8,000 samples a second plays twice as long, another codec longer still).
+ * header saying 8,000 samples a second plays twice as long, another codec longer still), and for this header over
+ * S/PDIF bursts of compressed sound (IEC 61937): ffmpeg finds them in a PCM WAV's first 64 KB of sound and plays the
+ * sound in them (review 2026-11-25: 15 s of sound in a file whose size says 2.1 s). Two of their sync words is the
+ * least ffmpeg takes for them; one in a real recording by chance changes nothing.
  */
 function appWavSeconds(b: Bytes): number | null {
   if (b.length < 44 || !tagAt(b, 0, "RIFF") || !tagAt(b, 8, "WAVEfmt ") || u32At(b, 16) !== 16 || u16At(b, 20) !== 1 ||
-      u16At(b, 22) !== 1 || u32At(b, 24) !== 16000 || u16At(b, 34) !== 16 || !tagAt(b, 36, "data")) return null;
+      u16At(b, 22) !== 1 || u32At(b, 24) !== 16000 || u32At(b, 28) !== 32000 || u16At(b, 32) !== 2 ||
+      u16At(b, 34) !== 16 || !tagAt(b, 36, "data")) return null;
+  let syncs = 0;
+  for (let i = 44, end = Math.min(b.length - 3, 44 + 65536); i < end; i++)
+    if (b.at(i) === 0x72 && b.at(i + 1) === 0xf8 && b.at(i + 2) === 0x1f && b.at(i + 3) === 0x4e && ++syncs === 2) return null;
   return (b.length - 44) / 32000;
 }
 
