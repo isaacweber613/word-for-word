@@ -408,3 +408,26 @@ types it.
   `Billing.subscribe` / `buyHours` as the Settings Subscribe row. To test the sheet without using up real
   minutes, build with `-PserviceUrl=http://localhost:8787` against a local server that answers 402
   `free_minutes_used`, with `adb reverse tcp:8787 tcp:8787` (debug builds allow plain HTTP to localhost).
+- Found while testing: Play's billing connection calls `onBillingSetupFinished` again on every automatic
+  reconnection try, which re-ran the last purchase check and reported the refused recording again each time
+  (three extra sheets). `Billing.client` now answers its caller once per connection.
+- Shipped 2026-11-25: app 126b664 + d714b3b as 0.9.18 (versionCode 55) on GitHub, Play internal testing
+  ("Available to internal testers"), and closed testing sent for review. Play APK 2,722,246 bytes (0.9.17:
+  2,719,223, +0.11%). Speed test: 16.2 ms from the stop to the upload starting. Checked on the emulator in
+  Messages: the sheet opened over it (`.dev/shots/subscribe-sheet-0.9.18.png`, not committed); the two
+  follow-up fixes in d714b3b were not re-checked on screen because another agent's session held the emulator.
+
+## Plan shown on the phone as the server has it (Isaac, 2026-11-25, 0.9.19)
+
+Isaac's phone said "Subscribed" and "This month's hours are used" after his test subscription had ended
+(Google: EXPIRED at 13:48 UTC; his free 30 minutes were used, Yiddish counting double). Cause: with an
+OpenRouter key typed, the app never asked the server about the plan (`Billing.sync` and the usage check ran
+only while free minutes were in use), so the old "Subscribed" stayed, and the mic would have offered
+"Add 4 hours for $1", hours that work only while subscribed. Fixed: the app asks the server at every open
+whenever Yiddish can use the minutes and hours; `Billing.sync` asks `/v1/usage` after sending purchases (an
+ended subscription sends nothing); a refusal also sets subscribed (`hours_used` only when subscribed); a
+Yiddish take or shared file blocked by the phone's last "nothing left" asks the server again first.
+`.github/workflows/check.yml` compiles the builds and runs the unit tests on GitHub, for checks when the PC
+has no memory to spare. Shipped as 0.9.19 (versionCode 56): GitHub release, Play internal testing
+("Available to internal testers"); closed testing not sent, since 0.9.18 went for review the same day.
+Speed test: 40.1 ms from the stop to the upload starting. Not yet seen on Isaac's phone.

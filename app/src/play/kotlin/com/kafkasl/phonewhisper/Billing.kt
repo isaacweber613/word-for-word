@@ -50,9 +50,14 @@ object Billing {
             .enablePendingPurchases(PendingPurchasesParams.newBuilder().enableOneTimeProducts().build())
             .enableAutoServiceReconnection()
             .build().also { client = it }
+        // Play calls this again on every automatic reconnection try; [ready] must run only once,
+        // or a failed recording was reported again with each try (seen on an emulator 2026-11-25).
+        val answered = java.util.concurrent.atomic.AtomicBoolean(false)
         c.startConnection(object : BillingClientStateListener {
-            override fun onBillingSetupFinished(result: BillingResult) =
+            override fun onBillingSetupFinished(result: BillingResult) {
+                if (answered.getAndSet(true)) return
                 ready(if (result.responseCode == BillingClient.BillingResponseCode.OK) c else null)
+            }
             override fun onBillingServiceDisconnected() {}
         })
     }
@@ -107,17 +112,20 @@ object Billing {
 
     /**
      * Sends this Google account's purchases to the server again: a new phone, a renewed month, or
-     * a purchase the app was closed during. Calls back true when the server says time is left.
+     * a purchase the app was closed during. Then asks the server what is left, since a subscription
+     * that ended sends nothing (it used to stay "Subscribed" on the phone). Calls back true when the
+     * server says time is left.
      */
     fun sync(context: Context, done: (Boolean) -> Unit) {
+        val ask = { FreeMinutes.usageNow(context); done(!FreeMinutes.out(context)) }
         client(context) { c ->
-            if (c == null) { done(false); return@client }
+            if (c == null) { thread { ask() }; return@client }
             c.queryPurchasesAsync(QueryPurchasesParams.newBuilder().setProductType(BillingClient.ProductType.SUBS).build()) { _, subs ->
                 c.queryPurchasesAsync(QueryPurchasesParams.newBuilder().setProductType(BillingClient.ProductType.INAPP).build()) { _, hours ->
                     thread {
                         (subs + hours).filter { it.purchaseState == Purchase.PurchaseState.PURCHASED }
                             .forEach { register(context, it) }
-                        done(!FreeMinutes.out(context))
+                        ask()
                     }
                 }
             }

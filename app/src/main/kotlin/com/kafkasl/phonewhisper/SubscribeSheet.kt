@@ -42,6 +42,7 @@ object SubscribeSheet {
      */
     fun offer(context: Context, message: String, notShown: () -> Unit): Boolean {
         if (!offers(message)) return false
+        if (SubscribeActivity.showing) return true
         val asked = SystemClock.uptimeMillis()
         context.startActivity(Intent(context, SubscribeActivity::class.java)
             .putExtra(SubscribeActivity.HOURS, message == FreeMinutes.OUT_HOURS)
@@ -155,15 +156,31 @@ class SubscribeActivity : AppCompatActivity() {
         const val HOURS = "hours"
         /** When the sheet last opened (uptime ms), so [SubscribeSheet.offer] knows Android let it open. */
         @Volatile var shownAt = 0L
+        /** True while a sheet is on screen, so a second refusal doesn't open another on top. */
+        @Volatile var showing = false
+        /** The last sheet opened. One left behind (Home pressed) closes when a new one opens. */
+        private var current: java.lang.ref.WeakReference<SubscribeActivity>? = null
     }
 
     private var sheet: Dialog? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        shownAt = SystemClock.uptimeMillis()
+        current?.get()?.takeIf { it !== this }?.finish()
+        current = java.lang.ref.WeakReference(this)
         sheet = SubscribeSheet.show(this, intent.getBooleanExtra(HOURS, false),
             "Ready. Press the mic to keep going.") { finish() }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        shownAt = SystemClock.uptimeMillis()
+        showing = true
+    }
+
+    override fun onStop() {
+        showing = false
+        super.onStop()
     }
 
     override fun onDestroy() {

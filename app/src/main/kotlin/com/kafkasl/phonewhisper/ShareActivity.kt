@@ -115,10 +115,17 @@ class ShareActivity : AppCompatActivity() {
         }
     }
 
-    private fun send(piece: ByteArray) {
+    private fun send(piece: ByteArray, rechecked: Boolean = false) {
         val wav = WavWriter.encode(piece)
         if (!yiddish) { sendCloud(piece, wav); return }
-        if (FreeMinutes.out(this)) { ui { fail(FreeMinutes.outMessage(this)) { showProgress(); thread { send(piece) } } }; return }
+        // The phone's last answer said nothing was left: ask the server again first (a renewal or a purchase since).
+        if (FreeMinutes.out(this) && !rechecked) {
+            Billing.sync(this) { left ->
+                if (left) thread { send(piece, rechecked = true) }
+                else ui { fail(FreeMinutes.outMessage(this)) { showProgress(); thread { send(piece) } } }
+            }
+            return
+        }
         val install = YiddishServer.installId(this)
         val result = YiddishServer.transcribeJob(this, wav, BuildConfig.VERSION_NAME, install, "app-share") { f ->
             ui { showProgress(done + (f * piece.size).toLong()) }

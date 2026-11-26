@@ -133,9 +133,8 @@ object YiddishServer {
                             else callback(failure(context, response.code, json))
                         }
                         // Nothing left: send the Google Play purchases again once, in case the subscription just renewed.
-                        // The server's answers to them say whether time is left (failure asks it otherwise).
-                        code in OUT_CODES && !retried && Billing.available -> {
-                            FreeMinutes.remember(context, out = true)
+                        code in FreeMinutes.OUT_CODES && !retried -> {
+                            FreeMinutes.noTimeLeft(context, code)
                             Billing.sync(context) { left -> if (left) send(true) else callback(failure(context, response.code, json)) }
                         }
                         else -> callback(failure(context, response.code, json))
@@ -213,15 +212,12 @@ object YiddishServer {
         if (e is java.net.UnknownHostException) "No internet connection. Your words weren't sent."
         else "Couldn't reach the Yiddish model. Try again.")
 
-    /** Word for Word's server's answers when nothing is left (server/src/index.ts yiddishCheck). */
-    private val OUT_CODES = setOf("free_minutes_used", "hours_used", "given_hours_used")
-
     private fun failure(context: Context, code: Int, json: JSONObject?): TranscriberClient.Result {
         val errorCode = json?.optString("code").orEmpty()
         // The server refuses a take that doesn't fit what is left (it holds a take's whole length first), so this
         // doesn't mean nothing is left: its own answer says (third review, 2026-11-25: marking the phone out here
         // stopped every Yiddish take until the app asked the server again).
-        if (errorCode in OUT_CODES) FreeMinutes.usage(context) { }
+        if (errorCode in FreeMinutes.OUT_CODES) FreeMinutes.usage(context) { }
         val msg = when {
             code == 503 -> "The Yiddish model is offline right now (the computer running it is off)."
             errorCode == "free_minutes_used" -> FreeMinutes.OUT_FREE

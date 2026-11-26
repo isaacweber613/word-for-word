@@ -7,7 +7,9 @@ Isaac's. Refresh the numbers from PostHog on the day of applying.
 
 ## Part 1: About your closed test
 
-**How easy was it to recruit testers?** Isaac's answer.
+**How easy was it to recruit testers?** "Neither easy nor difficult" (or the closest option). Isaac
+(11-25): "Not that easy." Answer honestly; Google says this part checks the app was really tested, and
+a hard-won group of real testers fits that.
 
 **Tester engagement (did testers use all features; did usage match expected production use?)**
 
@@ -23,9 +25,17 @@ and model choice, extra hours) testers used; only list what the data shows. -->
 
 
 
-**Summary of feedback and how it was collected.** Isaac's answer. No feedback was sent through Google
-Play's private testing feedback (checked 2026-11-25); say how testers told him (in person, messages,
-email) and what they said.
+**Summary of feedback and how it was collected.**
+
+We collected feedback in direct WhatsApp conversations with each tester, and watched anonymous usage
+counts for errors and slow results. The most common feedback was about getting the test version: after
+joining the testers' Google Group and accepting the invitation, several testers still could not find
+the app on Google Play until they cleared the Play Store app's cache. We helped each of them through it
+and put the group and opt-in links together on the app's page. Once installed, testers' feedback was
+mainly about speed and convenience, which led to the changes listed in Part 3.
+
+(Isaac, 11-25: testers told him in person on WhatsApp; the main thing was finding the app after opting
+in. Adjust the last sentence if testers said other things.)
 
 ## Part 2: About your app
 
@@ -40,7 +50,9 @@ model, and can keep or drop filler words. Every phone gets free minutes each mon
 subscribe for more hours or use their own API key. Recordings that could not be transcribed are kept in
 History so nothing said is lost. The app is open source.
 
-**Estimated installs in the first year.** Isaac's answer.
+**Estimated installs in the first year.** The lowest range offered (likely "0 - 10K"). It's a new app
+with no marketing yet, so the modest estimate is the honest one; the answer isn't public and doesn't
+limit installs.
 
 ## Part 3: About your production readiness
 
