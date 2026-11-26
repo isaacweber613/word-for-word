@@ -359,3 +359,18 @@ types it.
   2,719,223, +0.11%). Speed test: 16.2 ms from the stop to the upload starting. Checked on the emulator in
   Messages: the sheet opened over it (`.dev/shots/subscribe-sheet-0.9.18.png`, not committed); the two
   follow-up fixes in d714b3b were not re-checked on screen because another agent's session held the emulator.
+
+## Plan shown on the phone as the server has it (Isaac, 2026-11-25, 0.9.19)
+
+Isaac's phone said "Subscribed" and "This month's hours are used" after his test subscription had ended
+(Google: EXPIRED at 13:48 UTC; his free 30 minutes were used, Yiddish counting double). Cause: with an
+OpenRouter key typed, the app never asked the server about the plan (`Billing.sync` and the usage check ran
+only while free minutes were in use), so the old "Subscribed" stayed, and the mic would have offered
+"Add 4 hours for $1", hours that work only while subscribed. Fixed: the app asks the server at every open
+whenever Yiddish can use the minutes and hours; `Billing.sync` asks `/v1/usage` after sending purchases (an
+ended subscription sends nothing); a refusal also sets subscribed (`hours_used` only when subscribed); a
+Yiddish take or shared file blocked by the phone's last "nothing left" asks the server again first.
+`.github/workflows/check.yml` compiles the builds and runs the unit tests on GitHub, for checks when the PC
+has no memory to spare. Shipped as 0.9.19 (versionCode 56): GitHub release, Play internal testing
+("Available to internal testers"); closed testing not sent, since 0.9.18 went for review the same day.
+Speed test: 40.1 ms from the stop to the upload starting. Not yet seen on Isaac's phone.
