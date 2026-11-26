@@ -93,9 +93,11 @@ CREATE TABLE IF NOT EXISTS grant_usage (
 -- Each Yiddish take or shared Yiddish file the yiddishtry Worker sends to be typed (review, 2026-11-25), under the
 -- Worker's own id for it (take). Before it is sent, held plan seconds are added to bucket's counter (usage, grant_usage,
 -- subscription_usage, or taken from credit); once the model server has typed it, charged (what it measured, twice)
--- replaces held. state: held, charged, released (not typed: held given back), or refunded (a shared file's job that
--- failed after it was charged; job is its id). Added 2026-11-25: run this CREATE TABLE and its index on the live D1
--- before the deploy. Without the table, Yiddish takes are checked and counted as before.
+-- replaces held. state: held, charged, released (not typed: held given back), expired (held longer than any take can
+-- run, so its Worker stopped: held given back on the phone's next request, and charged all of it if its result still
+-- comes), or refunded (a shared file's job that failed after it was charged; job is its id). Added 2026-11-25: run this
+-- CREATE TABLE and its indexes on the live D1 before the deploy. Without the table, Yiddish takes are checked and
+-- counted as before.
 CREATE TABLE IF NOT EXISTS yiddish_takes (
   take TEXT PRIMARY KEY,
   device TEXT NOT NULL,
@@ -111,6 +113,7 @@ CREATE TABLE IF NOT EXISTS yiddish_takes (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS yiddish_takes_job ON yiddish_takes (job);
+CREATE INDEX IF NOT EXISTS yiddish_takes_device ON yiddish_takes (device, state);
 
 -- Phones Google Play doesn't vouch for (Isaac, 2026-11-24: "a page where i can see phone's that fail the
 -- check and i can click a button to give them 30 minutes a month"). The app reports a failed check with

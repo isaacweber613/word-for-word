@@ -586,7 +586,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   const code = accessCode(request.headers.get("X-Access-Code"));
   // Loaded before the device check: a valid access code stands in for a device token.
   let account = device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)
-    ? await store.account(device, month, code) : null;
+    ? await store.account(device, month, code, now.getTime() - TAKE_RUNS_MS) : null;
   // Without a device token, given hours (a code's or the phone's own) still work, but only they do.
   let grantOnly = false;
   if (device && account) {
@@ -713,6 +713,16 @@ export async function handle(request: Request, env: Env, store: Store, now = new
 /** How many plan seconds a second of Yiddish audio counts for (AGENTS.local.md). */
 export const YIDDISH_WEIGHT = 2;
 
+/**
+ * How long a Yiddish take can still be running after its hold (ms): the app waits 180 s for a take's answer
+ * (YiddishServer.kt, readTimeout), and Cloudflare gives a Worker 30 s after its answer, or after the phone has gone, to
+ * count or give back (ctx.waitUntil). A hold older than this whose take never settled (its Worker stopped: the phone's
+ * connection dropped, a deploy) is given back on the phone's next request (third review, 2026-11-25: it was counted for
+ * good). A slower take (a long upload, a hand-made request) is given back early and still counted once when its result
+ * comes (settleTake).
+ */
+export const TAKE_RUNS_MS = (180 + 30) * 1000;
+
 /** [held]: seconds of sound the take's hold covers (only when it was held), the most the model server may type. */
 export type CheckAnswer = { ok: true; held?: number } | { ok: false; status: number; code: string; message: string };
 
@@ -747,7 +757,8 @@ export async function yiddishCheck(env: Env, store: Store, device: unknown, toke
     return { ok: false, status: 400, code: "no_device", message: "Missing device ID." };
   }
   const free = Number(env.FREE_SECONDS_PER_MONTH);
-  let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null));
+  let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null),
+                              now.getTime() - TAKE_RUNS_MS);
   const vouched = typeof token === "string" && !!env.DEVICE_TOKEN_SECRET && await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token);
   if (vouched) {
     a = await refreshed(a, env, store, device, now.getTime(), fetcher, defer);

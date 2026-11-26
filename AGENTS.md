@@ -352,7 +352,11 @@ seconds plus one, twice over, all of it on the first hours with that much left, 
 sends the length held as `x-max-seconds`, so the model server refuses a longer take before typing it, and
 `yiddishCharge` counts what the model server measured (its answer's `seconds`) in place of the hold, once.
 `release` gives back the hold of a take that wasn't typed, `refund` what a shared file's job was counted when the job
-fails later, each once. A yiddishtry Worker from before this only checks and counts after, as before, and without the
+fails later, each once. A hold older than `TAKE_RUNS_MS` (210 s: the app's 180 s wait for a take and Cloudflare's 30 s
+after it) whose take never settled, because its Worker stopped (the phone's connection dropped, a deploy), is given back
+on the phone's next request (`account`); its result, if it still comes, is counted once. A take on bought hours is
+counted all of what was typed; hours it runs over stay below zero until the next top-up, as a normal recording's do
+(third review, 2026-11-25). A yiddishtry Worker from before this only checks and counts after, as before, and without the
 `yiddish_takes` table this server does the same, so either side can go out first; the hole closes once both are out.
 Release: the table, then `server/`, then yiddish-stt's `tryout/worker`. The cloud copy refuses a take longer than its
 hold only once yiddishvoicetotext's PR 1 cloud copy is deployed (`modal deploy backup/modal_app.py`), the PC once

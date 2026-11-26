@@ -226,7 +226,10 @@ describe("a local run of the server", () => {
         expect((await server.db.prepare("SELECT seconds FROM subscription_usage WHERE token = 's33'").first<{ seconds: number }>())!.seconds).toBe(20);
       });
 
-      it("counts bought hours down to zero, never below, even for a take longer than its hold", async () => {
+      it("counts a take on bought hours all of what was typed, even while another recording's time is held", async () => {
+        // Review 2026-11-25: the count was capped at the hold plus what other holds left, so a take that ran over its
+        // hold while a normal recording's time was held went partly free, and stayed free when that recording gave its
+        // time back. Bought hours a take runs over stay below zero until the next top-up, as a normal recording's do.
         const d = deviceId(34), now = Date.now(), period = now + 20 * DAY;
         await used(d, 1800);
         await server.db.batch([
@@ -237,15 +240,75 @@ describe("a local run of the server", () => {
           server.db.prepare("INSERT INTO credit (device, seconds) VALUES (?, 30)").bind(d),
         ]);
         const credit = () => server.db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(d).first<{ seconds: number }>().then((r) => r!.seconds);
+        const normal = (seconds: number) => server.db.prepare("UPDATE credit SET seconds = seconds + ? WHERE device = ?").bind(seconds, d).run();
         expect(await check(d, takeId(), 20)).toMatchObject({ ok: false, code: "hours_used" });   // 42 plan seconds don't fit in 30
         const t = takeId();
         expect(await check(d, t, 10)).toEqual({ ok: true, held: 11 });
         expect(await credit()).toBe(8);
-        // A PC whose server.py doesn't know x-max-seconds typed 20 s: all that is left goes, and no more.
+        await normal(-60);   // a 60 s recording's hold on the same hours (Store.reserve), while the take is typed
+        // A PC whose server.py doesn't know x-max-seconds typed 20 s: all of it counts.
         await server.yiddish("charge", d, 20, null, t, "j34");
-        expect(await credit()).toBe(0);
+        await normal(60);    // that recording wasn't typed and gave its time back
+        expect(await credit()).toBe(30 - 40);
         await server.yiddish("refund", "j34");
         expect(await credit()).toBe(30);
+      });
+
+      it("gives back a hold whose take never settled once no Worker can still be running it, and counts a late result once", async () => {
+        // Review 2026-11-25: a yiddishtry Worker stopped mid-take (the phone's connection dropped, a deploy) neither
+        // counted nor gave back its take, so the phone lost that time for good. The phone's next request now gives back a
+        // hold older than any take can run (TAKE_RUNS_MS: the app's 180 s wait for a take, and Cloudflare's 30 s after it).
+        const d = deviceId(41), e = deviceId(42);
+        const [t, u, v, w] = [takeId(), takeId(), takeId(), takeId()];
+        for (const take of [t, u]) expect(await check(d, take, 10)).toEqual({ ok: true, held: 11 });
+        expect(await check(e, v, 10)).toEqual({ ok: true, held: 11 });
+        expect(await freeUsed(d)).toBe(44);
+        await server.db.prepare("UPDATE yiddish_takes SET created_at = created_at - 211000").run();
+        // d's next request asks how much is left; e's is its next take.
+        expect((await server.fetch("/v1/usage", { headers: phone(d) })).status).toBe(200);
+        expect(await freeUsed(d)).toBe(0);
+        expect(await check(e, w, 10)).toEqual({ ok: true, held: 11 });
+        expect(await freeUsed(e)).toBe(22);
+        // u's Worker was only slow: its result still counts, once; t's late give-back changes nothing.
+        await server.yiddish("charge", d, 10, null, u);
+        await server.yiddish("charge", d, 10, null, u);
+        await server.yiddish("release", t);
+        expect(await freeUsed(d)).toBe(20);
+        // A hold younger than that stays.
+        expect((await server.fetch("/v1/usage", { headers: phone(e) })).status).toBe(200);
+        expect(await freeUsed(e)).toBe(22);
+      });
+
+      it("gives expired holds back once on every kind of hours, and leaves younger and counted takes alone", async () => {
+        const d = deviceId(43), now = Date.now(), period = now + 20 * DAY, old = now - 211000, m = month();
+        const take = (id: string, bucket: string, held: number, state: string, at: number, extra: [number | null, string | null, number | null] = [null, null, null]) =>
+          server.db.prepare("INSERT INTO yiddish_takes (take, device, month, bucket, grant_id, sub_token, sub_period, held, state, created_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, d, m, bucket, ...extra, held, state, at);
+        await server.db.batch([
+          server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, 100)").bind(d, m),
+          server.db.prepare("INSERT INTO grants (id, who, code, seconds, created_at) VALUES (2, 'Friend', 'K7QM4XPA9TRX', 3600, 0)"),
+          server.db.prepare("INSERT INTO grant_usage (grant_id, month, seconds) VALUES (2, ?, 50)").bind(m),
+          server.db.prepare("INSERT INTO subscriptions (token, product, expiry, state, checked, period) VALUES ('s43', 'monthly', ?, 'ACTIVE', ?, ?)")
+            .bind(period, now, period),
+          server.db.prepare("INSERT INTO subscription_devices (device, token) VALUES (?, 's43')").bind(d),
+          server.db.prepare("INSERT INTO subscription_usage (token, period, seconds) VALUES ('s43', ?, 70)").bind(period),
+          server.db.prepare("INSERT INTO credit (device, seconds) VALUES (?, 8)").bind(d),
+          take("x1", "free", 22, "held", old), take("x2", "grant", 10, "held", old, [2, null, null]),
+          take("x3", "sub", 22, "held", old, [null, "s43", period]), take("x4", "credit", 22, "held", old),
+          take("x5", "free", 6, "held", now), take("x6", "free", 40, "charged", old),
+        ]);
+        const counters = async () => [
+          await freeUsed(d),
+          (await server.db.prepare("SELECT seconds FROM grant_usage WHERE grant_id = 2").first<{ seconds: number }>())!.seconds,
+          (await server.db.prepare("SELECT seconds FROM subscription_usage WHERE token = 's43'").first<{ seconds: number }>())!.seconds,
+          (await server.db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(d).first<{ seconds: number }>())!.seconds,
+        ];
+        for (let i = 0; i < 2; i++) {
+          expect((await server.fetch("/v1/usage", { headers: phone(d) })).status).toBe(200);
+          expect(await counters()).toEqual([78, 40, 48, 30]);
+        }
+        const states = await server.db.prepare("SELECT take, state FROM yiddish_takes WHERE device = ? ORDER BY take").bind(d).all();
+        expect(states.results.map((r) => (r as { state: string }).state)).toEqual(["expired", "expired", "expired", "expired", "held", "charged"]);
       });
 
       it("gives a shared file back once when its job fails after it was counted", async () => {

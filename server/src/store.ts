@@ -58,8 +58,11 @@ export interface Account {
 export type Bucket = "grant" | "free" | "sub" | "credit";
 
 export interface Store {
-  /** [code] is the access code the call carried (normalized, see accessCode), or null. */
-  account(device: string, month: string, code?: string | null): Promise<Account>;
+  /**
+   * [code] is the access code the call carried (normalized, see accessCode), or null. With [expireBefore] (ms), first
+   * gives back, once, the phone's Yiddish holds made before then whose take never settled (state expired).
+   */
+  account(device: string, month: string, code?: string | null, expireBefore?: number | null): Promise<Account>;
   /**
    * Holds [seconds] on [bucket] for a recording about to be sent, only while what it used is still under
    * [limit] (null: no limit; bought hours: while any are left), in one statement, so calls at the same
@@ -100,8 +103,9 @@ export interface Store {
   holdTake(take: string, device: string, month: string, bucket: Bucket, seconds: number, limit: number | null,
            sub: Sub | null, grant: Grant | null, now: number): Promise<boolean>;
   /**
-   * Counts the held take [take] [seconds] in place of its hold, once, with [job] when it is a shared file's job. Bought
-   * hours end at zero, never below. False when it wasn't held or was already counted or given back.
+   * Counts the held take [take] [seconds] in place of its hold, once, with [job] when it is a shared file's job; a take
+   * whose hold expired is counted all of [seconds]. Bought hours a take runs over stay below zero until the next top-up.
+   * False when it wasn't held or was already counted or given back.
    */
   settleTake(take: string, seconds: number, job: string | null): Promise<boolean>;
   /** Gives back what the take [take] holds, once, when it wasn't typed. */
@@ -154,10 +158,31 @@ export function d1Store(db: D1Database): Store {
   };
   const takeRow = (where: string, value: string) =>
     db.prepare(`SELECT * FROM yiddish_takes WHERE ${where} = ?`).bind(value).first<TakeRow>();
+  /**
+   * For account's batch: gives back, once, what [device]'s takes held before [before] (ms) still hold, on the counter each
+   * is held on, and marks them expired (settleTake still counts one whose result comes).
+   */
+  const expireTakes = (device: string, before: number) => {
+    const stale = (bucket: string, cols = "1") => `SELECT ${cols} FROM yiddish_takes WHERE device = ?1 AND state = 'held' ` +
+      `AND created_at < ?2 AND bucket = '${bucket}'`;
+    const sum = (bucket: string, match: string) => `(SELECT sum(held) FROM yiddish_takes WHERE device = ?1 AND state = 'held' ` +
+      `AND created_at < ?2 AND bucket = '${bucket}' AND ${match})`;
+    return [
+      db.prepare(`UPDATE usage SET seconds = seconds - ${sum("free", "month = usage.month")} ` +
+        `WHERE device = ?1 AND month IN (${stale("free", "month")})`),
+      db.prepare(`UPDATE grant_usage SET seconds = seconds - ${sum("grant", "grant_id = grant_usage.grant_id AND month = grant_usage.month")} ` +
+        `WHERE (grant_id, month) IN (${stale("grant", "grant_id, month")})`),
+      db.prepare(`UPDATE subscription_usage SET seconds = seconds - ` +
+        `${sum("sub", "sub_token = subscription_usage.token AND sub_period = subscription_usage.period")} ` +
+        `WHERE (token, period) IN (${stale("sub", "sub_token, sub_period")})`),
+      db.prepare(`UPDATE credit SET seconds = seconds + ${sum("credit", "1")} WHERE device = ?1 AND EXISTS (${stale("credit")})`),
+      db.prepare("UPDATE yiddish_takes SET state = 'expired' WHERE device = ?1 AND state = 'held' AND created_at < ?2"),
+    ].map((s) => s.bind(device, before));
+  };
   return {
-    async account(device, month, code) {
-      // One round trip for everything a recording needs.
-      const [free, models, sub, credit, grant] = await db.batch([
+    async account(device, month, code, expireBefore) {
+      // One round trip for everything a recording needs, with the phone's expired Yiddish holds given back first.
+      const reads = [
         db.prepare("SELECT seconds FROM usage WHERE device = ? AND month = ?").bind(device, month),
         db.prepare("SELECT tier, models FROM models"),
         db.prepare(
@@ -171,7 +196,17 @@ export function d1Store(db: D1Database): Store {
         db.prepare("SELECT g.id, g.who, g.seconds, g.device, coalesce(u.seconds, 0) AS used FROM grants g " +
           "LEFT JOIN grant_usage u ON u.grant_id = g.id AND u.month = ? WHERE g.code = ? OR g.device = ? " +
           "ORDER BY g.device IS NULL DESC LIMIT 1").bind(month, code ?? "", device),
-      ]);
+      ];
+      const expire = expireBefore == null ? [] : expireTakes(device, expireBefore);
+      let results: D1Result[];
+      try {
+        results = (await db.batch([...expire, ...reads])).slice(expire.length);
+      } catch (e) {
+        // A database without yiddish_takes yet (schema.sql) has no holds to give back.
+        if (!expire.length || !/no such table/i.test(String((e as Error | null)?.message ?? e))) throw e;
+        results = await db.batch(reads);
+      }
+      const [free, models, sub, credit, grant] = results;
       const tiers = Object.fromEntries((models.results as { tier: string; models: string }[]).map((r) => [r.tier, r.models]));
       return {
         freeUsed: (free.results[0] as { seconds: number } | undefined)?.seconds ?? 0,
@@ -284,15 +319,15 @@ export function d1Store(db: D1Database): Store {
     },
     async settleTake(take, seconds, job) {
       const t = await takeRow("take", take);
-      if (!t || t.state !== "held") return false;
-      // Bought hours: never more than the hold and what nobody holds (a take holds only what is there, never below zero).
-      const [moved] = await db.batch([
-        db.prepare("UPDATE yiddish_takes SET state = 'charged', job = ?2, charged = CASE WHEN bucket = 'credit' " +
-          "THEN min(?1, held + max(0, coalesce((SELECT seconds FROM credit WHERE device = yiddish_takes.device), 0))) ELSE ?1 END " +
-          "WHERE take = ?3 AND state = 'held'").bind(seconds, job, take),
-        onTakeCounter(t, "charged - held"),
-      ]);
-      return (moved.meta.changes ?? 0) > 0;
+      if (!t || (t.state !== "held" && t.state !== "expired")) return false;
+      // All of [seconds], on bought hours too (third review, 2026-11-25: capped at the hold plus what other holds left, a
+      // take that ran over its hold while a normal recording's time was held went partly free). Held: in place of the
+      // hold. Expired (its hold given back since, account): all of it. One batch, so an expiry just before it is seen.
+      const moved = (from: string) => db.prepare("UPDATE yiddish_takes SET state = 'charged', job = ?2, charged = ?1 " +
+        "WHERE take = ?3 AND state = ?4").bind(seconds, job, take, from);
+      const [held, , expired] = await db.batch([moved("held"), onTakeCounter(t, "charged - held"),
+                                                moved("expired"), onTakeCounter(t, "charged")]);
+      return (held.meta.changes ?? 0) + (expired.meta.changes ?? 0) > 0;
     },
     async releaseTake(take) {
       const t = await takeRow("take", take);
