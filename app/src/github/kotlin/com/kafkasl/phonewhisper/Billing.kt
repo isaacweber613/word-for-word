@@ -10,5 +10,11 @@ object Billing {
     fun subscribe(activity: Activity, done: (String?) -> Unit) = done("Subscriptions are only in the Play Store version.")
     fun buyHours(activity: Activity, done: (String?) -> Unit) = done("Subscriptions are only in the Play Store version.")
     fun manage(activity: Activity) {}
-    fun sync(context: Context, done: (Boolean) -> Unit) = done(false)
+    /** Nothing to send; asks the server what is left of the hours given with an access code. True when time is left. */
+    fun sync(context: Context, done: (Boolean) -> Unit) {
+        kotlin.concurrent.thread {
+            FreeMinutes.usageNow(context)
+            done(!FreeMinutes.out(context))
+        }
+    }
 }

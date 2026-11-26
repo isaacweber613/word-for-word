@@ -24,11 +24,16 @@ KS="$HOME/.android/debug.keystore"
   assembleBrowserRelease assembleSelfInstallRelease -q
 
 ADB="$SDK/platform-tools/adb.exe"; [ -e "$ADB" ] || ADB="$SDK/platform-tools/adb"
-SERIAL=$("$ADB" devices | awk '/^emulator-/ && $2 == "device" { print $1; exit }')
+# Only this app's own emulator: other projects run theirs on this PC too (2026-11-25).
+AVD="${WFW_AVD:-FlashDim_Pixel_10_Pro_XL_API_37}"
+SERIAL=""
+for s in $("$ADB" devices | awk '/^emulator-/ && $2 == "device" { print $1 }'); do
+  [ "$("$ADB" -s "$s" emu avd name 2>/dev/null | head -1 | tr -d '\r')" = "$AVD" ] && { SERIAL=$s; break; }
+done
 STARTED=""
 if [ -z "$SERIAL" ]; then
   SERIAL=emulator-5584
-  "$SDK/emulator/emulator" -avd "${WFW_AVD:-FlashDim_Pixel_10_Pro_XL_API_37}" -port 5584 \
+  "$SDK/emulator/emulator" -avd "$AVD" -port 5584 \
     -no-window -no-boot-anim -no-snapshot-save >/dev/null 2>&1 &
   STARTED=$!
   trap '"$ADB" -s "$SERIAL" emu kill >/dev/null 2>&1 || true' EXIT
