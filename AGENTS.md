@@ -182,8 +182,13 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   attacks a local run (`test/local-run.ts`: the bundled Worker in Miniflare with a local D1 from `schema.sql`;
   every outside call goes to stand-ins, so no test can reach Google or OpenRouter). Fixed, each failing first:
   time was only checked before a recording and counted after it, so many recordings at once on a phone's, a
-  code's or a subscription's last second were all typed; now each holds its estimated length first in one
-  conditional statement (`Store.reserve`) and OpenRouter's measured length replaces it afterwards. Bought hours a
+  code's or a subscription's last second were all typed; now each holds its length first in one
+  conditional statement (`Store.reserve`) and OpenRouter's measured length replaces it afterwards. The length is read from
+  the audio itself (`audioLength`: the Opus packets of the app's Ogg, or the app's 44-byte 16 kHz WAV; anything else is
+  refused with 400, and the app sends a refused Ogg again as WAV), not guessed from the size: Opus can be far smaller per
+  second than the app's 24 kbit/s (libopus at the app's settings, as Android's encoder runs it: speech 13% smaller,
+  silence 12.6 times; a hand-made file of 1-byte packets 24 times), so such recordings were held a fraction of their length, five at once passed on a phone's last minute, and
+  `MAX_RECORDING_SECONDS` let ten minutes through as 26 s (third review, 2026-11-25). Bought hours a
   recording on their last seconds ran over stay below zero until the next top-up, which counts from zero, so it is
   never a debt (clipping them to zero at each recording gave back hours nobody bought when two overlapped). The phone's
   whole body went to OpenRouter on the server's key (provider routing, paid extras, a download link); now only

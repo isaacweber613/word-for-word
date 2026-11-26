@@ -14,7 +14,8 @@
     // and the one phone that fails (a OnePlus 8 Pro) got 30 minutes a month on the Failed checks page.
     "REQUIRE_INTEGRITY": "true"
     // Optional (review, 2026-11-25), off until Isaac picks the number: the longest recording one call may
-    // send, in seconds of audio. The app sends shared files in pieces of about 5 minutes; dictation has no cap.
+    // send, in seconds of audio, read from the audio itself. The app sends a shared file in pieces of at most 330 s (5 minutes,
+    // the last one up to 30 s more: AudioSplitter), so a number under 330 refuses parts of shared files; dictation has no cap.
     // "MAX_RECORDING_SECONDS": "<Isaac's number>"
   },
   // Optional rate limits (review, 2026-11-25), off until Isaac picks the numbers: recordings and purchase checks

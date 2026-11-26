@@ -11,6 +11,9 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { convertV4MiniflareOptions, Miniflare, Response as MfResponse } from "miniflare";
+import { oggOpus } from "./audio";
+
+export { oggOpus, wav } from "./audio";
 
 const SERVER = fileURLToPath(new URL("..", import.meta.url));
 
@@ -178,8 +181,12 @@ export function phone(device: string, opts: { token?: boolean; code?: string } =
     ...(opts.code ? { "X-Access-Code": opts.code } : {}) };
 }
 
-/** A recording as the app sends it: Ogg Opus at the app's 24 kbit/s (3,000 bytes a second), base64. */
+/** A recording as the app sends it: Ogg Opus at the app's 24 kbit/s (about 3,000 bytes a second), base64. */
 export function recording(seconds: number, extra: Record<string, unknown> = {}) {
-  return { model: "microsoft/mai-transcribe-2", input_audio: { data: Buffer.alloc(Math.round(seconds * 3000), 1).toString("base64"), format: "ogg" },
-    ...extra };
+  return { ...recordingOf(oggOpus(seconds)), ...extra };
+}
+
+/** A recording of [audio] in [format], base64, as a phone or a hand-made request would send it. */
+export function recordingOf(audio: Buffer, format = "ogg") {
+  return { model: "microsoft/mai-transcribe-2", input_audio: { data: audio.toString("base64"), format } };
 }

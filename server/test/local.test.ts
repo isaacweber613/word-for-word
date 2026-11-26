@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { d1Store } from "../src/store";
-import { deviceId, deviceToken, phone, recording, startLocal, type LocalServer } from "./local-run";
+import { deviceId, deviceToken, oggOpus, phone, recording, recordingOf, startLocal, wav, type LocalServer } from "./local-run";
 
 const month = () => new Date().toISOString().slice(0, 7);
 const DAY = 24 * 3600_000;
@@ -45,6 +45,32 @@ describe("a local run of the server", () => {
       const used = await server.eventually(async () => (await server.db.prepare("SELECT seconds FROM usage WHERE device = ?")
         .bind(d).first<{ seconds: number }>())!.seconds, (s) => Math.abs(s - 1859) < 1e-6);
       expect(used).toBeCloseTo(1859, 6); // the one recording, as OpenRouter measured it
+    });
+
+    it("can't send many recordings at once on the last minute by making each one smaller than its length", async () => {
+      // Review of d94dfad: the hold was the recording's size at 3,000 bytes a second. A minute of Opus in 1-byte packets
+      // (silence, or a hand-made file) is about 7.7 KB, held as 2.6 s, so five of them passed on the last minute.
+      const d = deviceId(5);
+      await server.db.prepare("INSERT INTO usage (device, month, seconds) VALUES (?, ?, 1740)").bind(d, month()).run();
+      const release = holdOpenRouter(60);
+      const statuses = await burst(Array.from({ length: 5 }, () => () =>
+        server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body: recordingOf(oggOpus(60, 1)) })), release);
+      expect(openrouterCalls()).toHaveLength(1);
+      expect(statuses).toEqual([200, 402, 402, 402, 402]);
+    });
+
+    it("sends OpenRouter only the app's own two kinds of audio", async () => {
+      // A WAV whose header says 8 kHz holds twice the sound its size says at the app's 16 kHz; bytes that aren't one Ogg
+      // Opus stream (another codec, or another file after it) have no length this server can know before sending them.
+      const d = deviceId(6);
+      for (const body of [recordingOf(wav(10, 8000), "wav"), recordingOf(Buffer.alloc(30000, 1)),
+        recordingOf(Buffer.concat([oggOpus(1), Buffer.alloc(3000, 1)])), recordingOf(oggOpus(10), "wav")]) {
+        expect((await server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body })).status).toBe(400);
+      }
+      expect(openrouterCalls()).toHaveLength(0);
+      for (const body of [recordingOf(wav(10), "wav"), recordingOf(oggOpus(10)), recordingOf(oggOpus(10, 1))]) {
+        expect((await server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body })).status).toBe(200);
+      }
     });
 
     it("can't use one access code's last minute on many phones at once", async () => {
@@ -106,7 +132,7 @@ describe("a local run of the server", () => {
         let typedGo!: () => void, failedGo!: () => void;
         const typedGate = new Promise<void>((r) => { typedGo = r; }), failedGate = new Promise<void>((r) => { failedGo = r; });
         server.stand.openrouter = async (body) => {
-          if (Buffer.from((body.input_audio as { data: string }).data, "base64").length > 60.5 * 3000) {
+          if (Buffer.from((body.input_audio as { data: string }).data, "base64").length > oggOpus(60.5).length) {
             await failedGate;
             return Response.json({ error: { message: "busy" } }, { status: 503 });
           }
@@ -422,6 +448,10 @@ describe("a local run with the optional limits set", () => {
     expect(res.status).toBe(413);
     expect(openrouterCalls()).toHaveLength(0);
     expect((await server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body: recording(299) })).status).toBe(200);
+    // Ten minutes of Opus in 1-byte packets is 77 KB, 26 s at the app's bitrate: still ten minutes.
+    const small = await server.fetch("/v1/transcriptions", { method: "POST", headers: phone(d), body: recordingOf(oggOpus(600, 1)) });
+    expect(small.status).toBe(413);
+    expect(openrouterCalls()).toHaveLength(1);
   });
 
   it("answers 429 past DEVICE_LIMITER's limit for one phone, and other phones go on", async () => {

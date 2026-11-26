@@ -16,9 +16,9 @@
  * The OpenRouter key has its own monthly spending limit set on openrouter.ai, which caps the
  * total cost even if someone fakes many phones.
  *
- * Each recording holds its estimated length on what pays for it before it is sent (Store.reserve), so
- * many recordings at once can't all pass on the same last second; OpenRouter's measured length replaces
- * the estimate afterwards. OpenRouter gets only what the app sends (forwardedBody). Optional limits,
+ * Each recording holds its length, read from the audio itself (audioLength), on what pays for it before it is
+ * sent (Store.reserve), so many recordings at once can't all pass on the same last second; OpenRouter's measured
+ * length replaces it afterwards. OpenRouter gets only what the app sends (forwardedBody). Optional limits,
  * all off until set (review, 2026-11-25): OPENROUTER_PAID_KEY, a key just for phones that pay, so free
  * or given use reaching OPENROUTER_KEY's limit doesn't stop them; MAX_RECORDING_SECONDS; and the rate
  * limits DEVICE_LIMITER (recordings and purchases per phone) and ADDRESS_LIMITER (phone checks per address).
@@ -105,29 +105,114 @@ export function monthOf(date: Date): string {
   return date.toISOString().slice(0, 7);
 }
 
+/** Base64's 64 letters, for reading a recording where needed instead of copying it whole. "=" (padding) reads as 0. */
+const B64 = (() => {
+  const t = new Uint8Array(128);
+  [..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"].forEach((c, i) => { t[c.charCodeAt(0)] = i; });
+  return t;
+})();
+
+interface Bytes { length: number; at(i: number): number }
+
 /**
- * Seconds of audio in a base64 WAV the app sent: 16 kHz, 16-bit mono is 32,000 bytes a
- * second, after a 44-byte header.
+ * The bytes of [s], read one at a time where they are needed (a recording can be 25 MB). Null when [s] isn't plain
+ * base64: a decoder that skips stray letters, as OpenRouter's might, would read other bytes from it than this server.
  */
-export function wavSeconds(base64: string): number {
-  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
-  const bytes = (base64.length * 3) / 4 - padding;
-  return Math.max(0, bytes - 44) / 32000;
+function base64Bytes(s: string): Bytes | null {
+  if (s.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s)) return null;
+  const v = (k: number) => B64[s.charCodeAt(k)];
+  return {
+    length: s.length / 4 * 3 - (s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0),
+    at(i) {
+      const o = Math.floor(i / 3) * 4, r = i % 3;
+      return (r === 0 ? v(o) << 2 | v(o + 1) >> 4 : r === 1 ? v(o + 1) << 4 | v(o + 2) >> 2 : v(o + 2) << 6 | v(o + 3)) & 255;
+    },
+  };
+}
+
+const tagAt = (b: Bytes, at: number, tag: string) => [...tag].every((c, k) => b.at(at + k) === c.charCodeAt(0));
+const u16At = (b: Bytes, at: number) => b.at(at) | b.at(at + 1) << 8;
+const u32At = (b: Bytes, at: number) => (u16At(b, at) | u16At(b, at + 2) << 16) >>> 0;
+
+/**
+ * Seconds of sound in the app's own WAV (WavWriter): a 44-byte header for one channel of 16-bit PCM at 16,000 samples a
+ * second, 32,000 bytes a second after it. Null for any other WAV, whose sound can be longer than its size says (a
+ * header saying 8,000 samples a second plays twice as long, another codec longer still).
+ */
+function appWavSeconds(b: Bytes): number | null {
+  if (b.length < 44 || !tagAt(b, 0, "RIFF") || !tagAt(b, 8, "WAVEfmt ") || u32At(b, 16) !== 16 || u16At(b, 20) !== 1 ||
+      u16At(b, 22) !== 1 || u32At(b, 24) !== 16000 || u16At(b, 34) !== 16 || !tagAt(b, 36, "data")) return null;
+  return (b.length - 44) / 32000;
 }
 
 /**
- * Seconds of audio in one recording. Since 0.9.7 the app sends small Ogg Opus audio instead of
- * WAV (Isaac, 2026-11-19: "as fast as possible"), so the length comes from OpenRouter's answer
- * (usage.seconds). Without it: WAV from its size, Ogg at the app's 24 kbit/s (3,000 bytes a second).
+ * 48 kHz samples one Opus packet plays, from its first two bytes (RFC 6716 3.1; the app's OggWriter.samples48k). An empty
+ * or malformed packet counts as the most one packet can hold, 120 ms (5,760), the most a decoder plays in its place.
  */
-export function audioSeconds(responseText: string, base64: string, format: string): number {
+function opusSamples(toc: number, count: number, size: number): number {
+  const config = toc >> 3, code = toc & 3;
+  const frame = config < 12 ? [480, 960, 1920, 2880][config & 3] : config < 16 ? [480, 960][config & 1] : [120, 240, 480, 960][config & 3];
+  const n = size === 0 ? 0 : frame * (code === 0 ? 1 : code < 3 ? 2 : size > 1 ? count & 63 : 0);
+  return n > 0 && n <= 5760 ? n : 5760;
+}
+
+/**
+ * Seconds of sound in one Ogg Opus stream (RFC 7845) as a decoder plays it: the sum of its packets' lengths, never the
+ * times written in its pages, which the sender chooses. Null unless the bytes are, end to end, the pages of one stream
+ * whose first two packets are Opus's headers, as the app's OggWriter writes them.
+ */
+function oggOpusSeconds(b: Bytes): number | null {
+  let at = 0, serial = -1, packets = 0, samples = 0, start = -1, size = 0;
+  const packet = (): boolean => {
+    if (packets === 0 ? !(size >= 19 && tagAt(b, start, "OpusHead")) : packets === 1 && !(size >= 8 && tagAt(b, start, "OpusTags"))) return false;
+    if (packets >= 2) samples += opusSamples(size ? b.at(start) : 0, size > 1 ? b.at(start + 1) : 0, size);
+    packets++;
+    start = -1;
+    return true;
+  };
+  while (at < b.length) {
+    if (at + 27 > b.length || !tagAt(b, at, "OggS") || b.at(at + 4) !== 0) return null;
+    const flags = b.at(at + 5), id = u32At(b, at + 14), segments = b.at(at + 26);
+    // One stream: the first page begins it, no later page begins another (a chained or second stream).
+    if (serial === -1 ? !(flags & 2) : id !== serial || (flags & 2) !== 0) return null;
+    serial = id;
+    let body = at + 27 + segments;
+    for (let k = 0; k < segments; k++) {
+      const lace = b.at(at + 27 + k);
+      if (start < 0) { start = body; size = 0; }
+      size += lace;
+      body += lace;
+      if (lace < 255 && !packet()) return null;
+    }
+    if (body > b.length) return null;
+    at = body;
+  }
+  if (start >= 0 && !packet()) return null;   // a packet the last page leaves open still counts
+  return packets >= 2 ? samples / 48000 : null;
+}
+
+/**
+ * Seconds of sound in a recording, read from the audio itself (review, 2026-11-25: it was guessed from the size at the
+ * app's 24 kbit/s, 3,000 bytes a second, and Opus can be far smaller per second: the app's own encoder makes silence
+ * about 12 times smaller, a hand-made file of 1-byte packets 24 times, so several such recordings were held a fraction
+ * of their length and all passed on the last minute, and MAX_RECORDING_SECONDS let them through). [format] is what the
+ * app sends: "ogg" (one Ogg Opus stream, OggWriter) or "wav" (WavWriter). Null for anything else.
+ */
+export function audioLength(base64: string, format: string): number | null {
+  const b = base64Bytes(base64);
+  return !b ? null : format === "wav" ? appWavSeconds(b) : format === "ogg" ? oggOpusSeconds(b) : null;
+}
+
+/**
+ * Seconds of audio in one recording: what OpenRouter measured (usage.seconds), else [length], the recording's own
+ * length (audioLength).
+ */
+export function audioSeconds(responseText: string, length: number): number {
   try {
     const s = (JSON.parse(responseText) as { usage?: { seconds?: unknown } }).usage?.seconds;
     if (typeof s === "number" && s > 0) return s;
   } catch { /* fall through */ }
-  if (format === "wav") return wavSeconds(base64);
-  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
-  return ((base64.length * 3) / 4 - padding) / 3000;
+  return length;
 }
 
 /**
@@ -135,15 +220,14 @@ export function audioSeconds(responseText: string, base64: string, format: strin
  * dollars an hour (what OpenRouter charged, usage.cost, at [base] an hour). A model at or under
  * [base] counts 1:1, so 10 paid hours are 10 real hours on any model up to $0.15 an hour.
  */
-export function planSeconds(responseText: string, base64: string, format: string, model: ModelChoice,
-                            base = FREE_BASE_PER_HOUR): number {
+export function planSeconds(responseText: string, length: number, model: ModelChoice, base = FREE_BASE_PER_HOUR): number {
   try {
     const cost = (JSON.parse(responseText) as { usage?: { cost?: unknown } }).usage?.cost;
     if (typeof cost === "number" && cost > 0) {
-      return Math.max(audioSeconds(responseText, base64, format), cost / base * 3600);
+      return Math.max(audioSeconds(responseText, length), cost / base * 3600);
     }
   } catch { /* fall through */ }
-  return audioSeconds(responseText, base64, format) * Math.max(1, (model.per_hour ?? base) / base);
+  return audioSeconds(responseText, length) * Math.max(1, (model.per_hour ?? base) / base);
 }
 
 /**
@@ -559,20 +643,22 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   if (typeof audio !== "string" || audio.length === 0) return error(400, "No audio in the request.");
   const format = body.input_audio?.format ?? "wav";
   if (typeof format !== "string" || !FORMATS.includes(format)) return error(400, "Unsupported audio format.");
-  // The recording's length from its size, before anything is sent; what OpenRouter measures replaces it afterwards.
-  const estimate = audioSeconds("", audio, format);
+  // The recording's length from the audio itself, before anything is sent; what OpenRouter measures replaces it
+  // afterwards. Audio this server can't measure is refused (the app sends an Ogg it refuses again as WAV).
+  const length = audioLength(audio, format);
+  if (length == null) return error(400, "Unsupported audio format.");
   const longest = Number(env.MAX_RECORDING_SECONDS);
-  if (env.MAX_RECORDING_SECONDS && Number.isFinite(longest) && estimate > longest) {
+  if (env.MAX_RECORDING_SECONDS && Number.isFinite(longest) && length > longest) {
     return error(413, "That recording is too long to send in one piece. Try a shorter one.", "too_long");
   }
 
   const a = account ?? await store.account(device, month, code);
-  // Holds the estimate on what pays, in one statement that refuses once nothing is left, before the audio goes
-  // out (review, 2026-11-25: the time was only checked before and counted after, so many recordings sent at
+  // Holds the recording's length on what pays, in one statement that refuses once nothing is left, before the audio
+  // goes out (review, 2026-11-25: the time was only checked before and counted after, so many recordings sent at
   // once on a phone's, a code's or a subscription's last second were all typed and paid for by Isaac).
   let pick: { bucket: Bucket; paid: boolean } | null = null;
   for (const p of choices(a, now.getTime(), free, grantOnly)) {
-    if (await store.reserve(device, month, p.bucket, estimate, limitOf(p.bucket, a, free), a.sub, a.grant)) { pick = p; break; }
+    if (await store.reserve(device, month, p.bucket, length, limitOf(p.bucket, a, free), a.sub, a.grant)) { pick = p; break; }
   }
   if (!pick) return outOfTime(a, now.getTime(), free);
 
@@ -607,13 +693,13 @@ export async function handle(request: Request, env: Env, store: Store, now = new
     text = JSON.stringify({ error: { message: "No model answered." } });
   }
 
-  // Only audio that came back as text counts: the estimate held becomes what OpenRouter measured, or is
+  // Only audio that came back as text counts: the length held becomes what OpenRouter measured, or is
   // given back. Saved after the answer goes back.
   const typed = status >= 200 && status < 300 && used;
-  const charged = typed ? planSeconds(text, audio, format, used!, pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR) : 0;
+  const charged = typed ? planSeconds(text, length, used!, pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR) : 0;
   // Bought hours held below zero stay there until the next top-up, which counts from zero (Store.addTopup): clipped to
   // zero here, another recording's hold still out in them came back as hours nobody bought (Codex review of 52c15aa).
-  if (charged !== estimate) await later(store.charge(device, month, pick.bucket, charged - estimate, a.sub, a.grant));
+  if (charged !== length) await later(store.charge(device, month, pick.bucket, charged - length, a.sub, a.grant));
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
 }
 

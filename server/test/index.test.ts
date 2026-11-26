@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
-  accessCode, audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds,
+  accessCode, audioLength, audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS,
   yiddishCharge, yiddishCheck, type Env,
 } from "../src/index";
+import { oggOpus, wav } from "./audio";
 import { DEFAULT_MODELS, usagePeriod, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
 
 const device = "a".repeat(64);
@@ -92,9 +93,9 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
   return { s, store };
 }
 
-/** A base64 WAV body of [seconds] of audio, as the app sends it. */
+/** A base64 WAV body of [seconds] of audio, as the app sends it (WavWriter). */
 function audio(seconds: number): string {
-  return Buffer.alloc(44 + seconds * 32000).toString("base64");
+  return wav(seconds).toString("base64");
 }
 
 function transcribe(seconds: number, extra: Record<string, unknown> = {}, headers: Record<string, string> = { "X-Device-Id": device }) {
@@ -108,36 +109,45 @@ const ok = (async () => Response.json({ text: "hello" })) as unknown as typeof f
 
 describe("transcription server", () => {
   it("measures audio length from the WAV", () => {
-    expect(wavSeconds(audio(10))).toBeCloseTo(10, 5);
+    expect(audioLength(audio(10), "wav")).toBeCloseTo(10, 5);
+  });
+
+  it("measures Ogg Opus by its packets, whatever its size", () => {
+    expect(audioLength(oggOpus(10).toString("base64"), "ogg")).toBeCloseTo(10, 5);
+    expect(audioLength(oggOpus(10, 1).toString("base64"), "ogg")).toBeCloseTo(10, 5);
+    expect(audioLength(oggOpus(10, 300).toString("base64"), "ogg")).toBeCloseTo(10, 5);   // packets over a lacing value
+    expect(audioLength(oggOpus(10).toString("base64"), "wav")).toBeNull();
+    expect(audioLength(wav(10, 8000).toString("base64"), "wav")).toBeNull();
+    expect(audioLength(" " + audio(10), "wav")).toBeNull();
   });
 
   it("counts compressed audio by the seconds OpenRouter reports", () => {
-    expect(audioSeconds(JSON.stringify({ text: "hi", usage: { seconds: 13.74 } }), "AAAA", "ogg")).toBe(13.74);
+    expect(audioSeconds(JSON.stringify({ text: "hi", usage: { seconds: 13.74 } }), 1)).toBe(13.74);
   });
 
-  it("estimates Ogg audio from its size when OpenRouter reports no seconds", () => {
-    expect(audioSeconds(JSON.stringify({ text: "hi" }), Buffer.alloc(30000).toString("base64"), "ogg")).toBeCloseTo(10, 5);
+  it("counts the recording's own length when OpenRouter reports no seconds", () => {
+    expect(audioSeconds(JSON.stringify({ text: "hi" }), 10)).toBe(10);
   });
 
   it("counts plan seconds by what OpenRouter charged, at $0.10 an hour", () => {
     // 12 s at $0.10/h costs $0.000333: 12 plan seconds. The same 12 s at $0.54/h: 64.8.
-    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * 0.1 / 3600 } }), "", "ogg",
+    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * 0.1 / 3600 } }), 0,
       { id: "x", per_hour: 0.1 })).toBeCloseTo(12, 5);
-    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * 0.54 / 3600 } }), "", "ogg",
+    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * 0.54 / 3600 } }), 0,
       { id: "x", per_hour: 0.54 })).toBeCloseTo(64.8, 5);
   });
 
   it("counts paid hours 1:1 up to $0.15 an hour, faster above it", () => {
     const at = (perHour: number) => planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * perHour / 3600 } }),
-      "", "ogg", { id: "x", per_hour: perHour }, 0.15);
+      0, { id: "x", per_hour: perHour }, 0.15);
     expect(at(0.06)).toBeCloseTo(12, 5);
     expect(at(0.15)).toBeCloseTo(12, 5);
     expect(at(0.27)).toBeCloseTo(21.6, 5);
   });
 
   it("uses the model's price when OpenRouter reports no cost, never less than one second a second", () => {
-    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), "", "ogg", { id: "x", per_hour: 0.27 })).toBeCloseTo(27, 5);
-    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), "", "ogg", { id: "x", per_hour: 0.06 })).toBeCloseTo(10, 5);
+    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), 0, { id: "x", per_hour: 0.27 })).toBeCloseTo(27, 5);
+    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), 0, { id: "x", per_hour: 0.06 })).toBeCloseTo(10, 5);
   });
 
   it("names months in UTC", () => {
