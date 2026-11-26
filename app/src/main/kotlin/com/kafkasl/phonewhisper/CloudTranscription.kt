@@ -98,8 +98,8 @@ object CloudTranscription {
             } else if (!result.text.isNullOrBlank()) {
                 FreeMinutes.remember(context, out = false)
                 done(result.text, result.servedBy ?: model, result.servedBy ?: model)
-            } else if (result.errorCode in setOf("free_minutes_used", "hours_used", "given_hours_used")) {
-                FreeMinutes.remember(context, out = true)
+            } else if (result.errorCode in FreeMinutes.OUT_CODES) {
+                FreeMinutes.noTimeLeft(context, result.errorCode)
                 if (Billing.available && !retried) {
                     Billing.sync(context) { left ->
                         if (left) send(model) { viaServer(it, true) } else callback(Outcome(null, model, null, result))

@@ -828,12 +828,19 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startRecording(via: String, yiddish: Boolean = false) {
+    private fun startRecording(via: String, yiddish: Boolean = false, rechecked: Boolean = false) {
         if (yiddish && YiddishServer.needsConsent(prefs())) { askYiddishConsent(via); return }
         // Uses the same minutes and hours as other recordings, whatever key is typed (AGENTS.local.md).
-        if (yiddish && FreeMinutes.out(this)) {
-            val msg = FreeMinutes.outMessage(this)
-            if (!SubscribeSheet.offer(this, msg) { toast(msg) }) toast(msg)
+        // The phone's last answer said nothing was left: ask the server again first, since a renewal, a
+        // purchase on another phone or hours given since then reach the phone only that way.
+        if (yiddish && FreeMinutes.out(this) && !rechecked) {
+            Billing.sync(this) { left ->
+                handler.post {
+                    if (state != State.IDLE) return@post
+                    if (left) startRecording(via, yiddish = true, rechecked = true)
+                    else FreeMinutes.outMessage(this).let { msg -> if (!SubscribeSheet.offer(this, msg) { toast(msg) }) toast(msg) }
+                }
+            }
             return
         }
         if (androidx.core.content.ContextCompat.checkSelfPermission(this, android.Manifest.permission.RECORD_AUDIO)

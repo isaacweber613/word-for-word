@@ -3,13 +3,10 @@ package com.kafkasl.phonewhisper
 import android.annotation.SuppressLint
 import android.content.Context
 import android.provider.Settings
-import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Callback
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.Response
 import org.json.JSONObject
 import java.io.IOException
 import java.security.MessageDigest
@@ -124,12 +121,17 @@ object FreeMinutes {
     private val http by lazy { OkHttpClient() }
 
     /** Asks the server how much of this month's free time is used. Calls back with null on failure. */
-    fun usage(context: Context, callback: (Usage?) -> Unit) { thread {
+    fun usage(context: Context, callback: (Usage?) -> Unit) { thread { callback(usageNow(context)) } }
+
+    /**
+     * Asks the server now what is left, and remembers whether the phone is subscribed and out. Null when
+     * the server didn't answer. Blocks, so never call it on the main thread.
+     */
+    fun usageNow(context: Context): Usage? {
         register(context)
         val request = identify(Request.Builder().url(BuildConfig.SERVICE_URL + "/v1/usage"), context).get().build()
-        http.newCall(request).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) = callback(null)
-            override fun onResponse(call: Call, response: Response) {
+        return try {
+            http.newCall(request).execute().use { response ->
                 val body = response.body?.string()
                 // The code was removed on the access page: stop sending it.
                 try { if (response.isSuccessful && JSONObject(body ?: "").let { it.has("access") && it.isNull("access") }) Access.clear(context) }
@@ -142,10 +144,10 @@ object FreeMinutes {
                     }
                 } catch (e: Exception) { null }
                 usage?.let { remember(context, it.subscribed, it.out) }
-                callback(usage)
+                usage
             }
-        })
-    } }
+        } catch (e: IOException) { null }
+    }
 
     // --- The paid plan (Isaac, 2026-11-20): $3 a month for 10 hours, $1 for 4 more hours ---
 
@@ -160,6 +162,18 @@ object FreeMinutes {
     /** True when the server last said nothing is left this month. A new month starts fresh. */
     fun out(context: Context) = prefs(context).getBoolean("plan_out", false) &&
         prefs(context).getString("plan_out_month", "") == month()
+
+    /** The server's answers when nothing is left this month (outOfTime in server/src/index.ts). */
+    val OUT_CODES = setOf("free_minutes_used", "hours_used", "given_hours_used")
+
+    /**
+     * Remembers a refusal for [errorCode] from the server. It says hours_used only to a phone that is
+     * subscribed, so the refusal also says whether it is: a subscription that ended no longer shows
+     * as Subscribed, and the mic no longer offers 4 more hours that work only while subscribed.
+     */
+    fun noTimeLeft(context: Context, errorCode: String?) {
+        if (errorCode in OUT_CODES) remember(context, subscribed = errorCode == "hours_used", out = true)
+    }
 
     fun outMessage(context: Context) = when {
         subscribed(context) -> OUT_HOURS

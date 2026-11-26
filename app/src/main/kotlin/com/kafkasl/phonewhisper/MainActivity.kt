@@ -339,7 +339,8 @@ class MainActivity : AppCompatActivity() {
         refresh()
         useAccessLink(intent)
         // A subscription bought on another phone, or a month that renewed, reaches the server.
-        if (Billing.available && FreeMinutes.inUse(this)) Billing.sync(this) { runOnUiThread { if (!isFinishing) refresh() } }
+        // Also with the person's own key: Yiddish takes use the minutes and hours whatever key is typed.
+        if (Billing.available) Billing.sync(this) { runOnUiThread { if (!isFinishing) refresh() } }
     }
 
     override fun onResume() {
@@ -592,7 +593,9 @@ class MainActivity : AppCompatActivity() {
 
     /** Shows how many of this month's free minutes are used, under the API key row. */
     private fun loadFreeMinutes() {
-        if (!FreeMinutes.inUse(this)) return
+        // With the person's own key too, while Yiddish can use the minutes and hours: it also updates
+        // the Subscribe row, which kept saying "Subscribed" after a subscription ended (2026-11-25).
+        if (!FreeMinutes.inUse(this) && !YiddishServer.available(this)) return
         FreeMinutes.usage(this) { usage ->
             if (usage == null) return@usage
             runOnUiThread {
