@@ -86,9 +86,9 @@ export interface Store {
   /** The purchase tokens of [device]'s counted top-ups last checked (or bought, if never checked) before [before]. */
   staleTopups(device: string, before: number): Promise<string[]>;
   /**
-   * Takes back what is left of each voided top-up's hours from its phone, never below zero, once per
-   * top-up. Then marks as checked at [now] the counted top-ups Google's refund list covered (last checked,
-   * or bought, since [since]) and all of [device]'s, which were asked about one by one. Answers how many
+   * Takes back what is left of each voided top-up's own hours from its phone (the oldest bought hours used first),
+   * never below zero, once per top-up. Then marks as checked at [now] the counted top-ups Google's refund list covered
+   * (last checked, or bought, since [since]) and all of [device]'s, which were asked about one by one. Answers how many
    * were taken back.
    */
   takeBackTopups(voided: string[], now: number, since: number, device: string): Promise<number>;
@@ -241,10 +241,16 @@ export function d1Store(db: D1Database): Store {
     },
     async takeBackTopups(voided, now, since, device) {
       // One transaction: a top-up already taken back, or one this server never counted, changes nothing.
+      // What is left of the refunded top-up itself, with the oldest bought hours used first: the phone's balance less the
+      // top-ups bought after it, never more than its own hours or below zero (third review, 2026-11-25: its whole 4 hours
+      // came off the balance, so a top-up used up and then refunded took the hours of one bought after it).
       const results = await db.batch([
         ...voided.flatMap((token) => [
-          db.prepare("UPDATE credit SET seconds = max(0, seconds - (SELECT seconds FROM topups WHERE token = ? AND voided IS NULL)) " +
-            "WHERE device = (SELECT device FROM topups WHERE token = ? AND voided IS NULL)").bind(token, token),
+          db.prepare("UPDATE credit SET seconds = seconds - min((SELECT seconds FROM topups WHERE token = ?1 AND voided IS NULL), " +
+            "max(0, seconds - (SELECT coalesce(sum(t.seconds), 0) FROM topups t JOIN topups v ON v.token = ?1 " +
+            "WHERE t.device = v.device AND t.voided IS NULL AND t.token != v.token AND " +
+            "(t.created_at > v.created_at OR (t.created_at = v.created_at AND t.token > v.token))))) " +
+            "WHERE device = (SELECT device FROM topups WHERE token = ?1 AND voided IS NULL)").bind(token),
           db.prepare("UPDATE topups SET voided = ? WHERE token = ? AND voided IS NULL").bind(now, token),
         ]),
         // Another phone's top-up last checked before [since] stays unchecked until that phone asks about it itself.

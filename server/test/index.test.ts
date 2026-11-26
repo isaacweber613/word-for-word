@@ -4,7 +4,8 @@ import {
   yiddishCharge, yiddishCheck, type Env,
 } from "../src/index";
 import { oggOpus, wav } from "./audio";
-import { DEFAULT_MODELS, usagePeriod, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
+import { sqliteD1 } from "./sqlite-d1";
+import { d1Store, DEFAULT_MODELS, usagePeriod, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
 
 const device = "a".repeat(64);
 const env = { OPENROUTER_KEY: "test-key", FREE_SECONDS_PER_MONTH: "1800" } as Env;
@@ -75,7 +76,10 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
       for (const token of voided) {
         const t = s.topups.get(token);
         if (!t || t.voided != null) continue;
-        s.credit = Math.max(0, s.credit - t.seconds);
+        // What is left of this top-up itself, the oldest bought hours used first, as in D1.
+        const after = [...s.topups.values()].filter((o) => o !== t && o.voided == null && o.created > t.created)
+          .reduce((n, o) => n + o.seconds, 0);
+        s.credit -= Math.min(t.seconds, Math.max(0, s.credit - after));
         t.voided = at;
         taken++;
       }
@@ -615,6 +619,27 @@ describe("transcription server", () => {
       const { s, store } = memoryStore({ ...paying, credit: TOPUP_SECONDS, topups: [bought("tok")] });
       await yiddishCheck(e, store, device, await deviceToken("secret", device), now, null, g.fetcher);
       expect(s.credit).toBe(0);
+    });
+
+    it("takes back only what is left of the refunded top-up itself, the oldest bought hours used first (the real SQL)", async () => {
+      // Third review, 2026-11-25: a phone's bought hours are one balance, and a refund took the top-up's whole 4 hours
+      // from it, so a top-up used up and then refunded took the 4 hours of a top-up bought after it.
+      const db = sqliteD1(), store = d1Store(db);
+      const credit = async () => (await db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(device).first<{ seconds: number }>())!.seconds;
+      await store.addTopup("used", device, TOPUP_SECONDS, 1);
+      await store.charge(device, "2026-11", "credit", TOPUP_SECONDS, null);
+      await store.addTopup("new", device, TOPUP_SECONDS, 2);
+      expect(await store.takeBackTopups(["used"], 3, 0, device)).toBe(1);
+      expect(await credit()).toBe(TOPUP_SECONDS);   // nothing of the refunded one was left
+      // One hour of three top-ups used: the first had 3 hours left, and those go; the newest is taken whole.
+      const other = "b".repeat(64), creditOf = async () =>
+        (await db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(other).first<{ seconds: number }>())!.seconds;
+      for (const [t, at] of [["x", 10], ["y", 11], ["z", 12]] as const) await store.addTopup(t, other, TOPUP_SECONDS, at);
+      await store.charge(other, "2026-11", "credit", 3600, null);
+      await store.takeBackTopups(["x"], 13, 0, other);
+      expect(await creditOf()).toBe(2 * TOPUP_SECONDS);
+      await store.takeBackTopups(["z", "z"], 14, 0, other);
+      expect(await creditOf()).toBe(TOPUP_SECONDS);
     });
   });
 
