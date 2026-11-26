@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
-  accessCode, audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS, wavSeconds,
+  accessCode, audioLength, audioSeconds, choose, deviceToken, handle, integrityProblem, monthOf, planSeconds, SUB_SECONDS, TOPUP_SECONDS,
   yiddishCharge, yiddishCheck, type Env,
 } from "../src/index";
-import { d1Store, DEFAULT_MODELS, usagePeriod, type Account, type Bucket, type FailedCheck, type Grant, type Models, type Store, type Sub } from "../src/store";
+import { oggOpus, wav, withSyncs } from "./audio";
 import { sqliteD1 } from "./sqlite-d1";
+import { d1Store, DEFAULT_MODELS, usagePeriod, type Account, type FailedCheck, type Grant, type Hold, type Models, type Store,
+  type Sub } from "../src/store";
 
 const device = "a".repeat(64);
 const env = { OPENROUTER_KEY: "test-key", FREE_SECONDS_PER_MONTH: "1800" } as Env;
@@ -25,6 +27,8 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
     // Plan seconds per paid month (subscription_usage), keyed like the D1 store.
     usage: new Map<number, number>(init.sub ? [[init.sub.period ?? init.sub.expiry, init.subUsed ?? 0]] : []),
     failed: new Map<string, FailedCheck & { count: number }>(),
+    // Holds already counted (settle counts each once, as in D1).
+    settled: new Set<string>(),
   };
   const store: Store = {
     async account(d, _m, code): Promise<Account> {
@@ -32,23 +36,51 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
         ? { id: 1, who: s.grant.who, seconds: s.grant.seconds, used: s.grant.used, device: s.grant.device ?? null } : null;
       return { freeUsed: s.free, grant: g, models: s.models, sub: s.sub ? { ...s.sub, used: s.usage.get(s.sub.period ?? s.sub.expiry) ?? 0 } : null, credit: s.credit };
     },
-    async charge(_d, _m, bucket: Bucket, seconds, sub) {
+    async reserve(h: Hold, limit) {
+      const { bucket, seconds, sub } = h;
+      if (bucket === "grant") {
+        if (!s.grant || (limit != null && s.grant.used >= limit)) return false;
+        s.grant.used += seconds;
+      } else if (bucket === "free") {
+        if (s.free >= limit!) return false;
+        s.free += seconds;
+      } else if (bucket === "sub") {
+        const k = sub!.period ?? sub!.expiry;
+        if ((s.usage.get(k) ?? 0) >= limit!) return false;
+        s.usage.set(k, (s.usage.get(k) ?? 0) + seconds);
+        s.subUsed += seconds;
+      } else {
+        if (!(s.credit > 0)) return false;
+        s.credit -= seconds; // may go below zero while held, as in D1; charge settles it
+      }
+      return true;
+    },
+    async settle(h, seconds) {
+      if (s.settled.has(h.id)) return;
+      s.settled.add(h.id);
+      await store.charge(h.device, h.month, h.bucket, seconds - h.seconds, h.sub, h.grant);
+    },
+    async charge(_d, _m, bucket, seconds, sub) {
       if (bucket === "sub" && sub) s.usage.set(sub.period ?? sub.expiry, (s.usage.get(sub.period ?? sub.expiry) ?? 0) + seconds);
       if (bucket === "grant") s.grant!.used += seconds;
       else if (bucket === "free") s.free += seconds;
       else if (bucket === "sub") s.subUsed += seconds;
-      else s.credit = Math.max(0, s.credit - seconds);
+      else s.credit -= seconds;   // may stay below zero, as in D1; a top-up counts from zero
     },
     async saveSubscription(_d, sub) { s.sub = { ...sub, period: usagePeriod(s.sub?.token === sub.token ? s.sub : null, sub) }; },
     async addTopup(token, _d, seconds, at) {
       if (s.topups.has(token)) return false;
-      s.topups.set(token, { seconds, created: at, checked: null, voided: null }); s.credit += seconds; return true;
+      s.topups.set(token, { seconds, created: at, checked: null, voided: null }); s.credit = Math.max(0, s.credit) + seconds; return true;
     },
     async topupsChecked() {
       const counted = [...s.topups.values()].filter((t) => t.voided == null);
       return counted.length ? Math.min(...counted.map((t) => t.checked ?? t.created)) : null;
     },
+    async staleTopups(_d, before) {
+      return [...s.topups].filter(([, t]) => t.voided == null && (t.checked ?? t.created) < before).map(([token]) => token);
+    },
     async takeBackTopups(voided, at) {
+      // Every top-up here is the one phone's, which the real store marks checked whatever Google's list covered.
       let taken = 0;
       for (const token of voided) {
         const t = s.topups.get(token);
@@ -65,13 +97,18 @@ function memoryStore(init: Partial<{ free: number; models: Models; sub: Sub | nu
     },
     async failedCheck(d, r) { s.failed.set(d, { ...r, count: (s.failed.get(d)?.count ?? 0) + 1 }); },
     async passedCheck(d) { if (s.grant?.device !== d) s.failed.delete(d); },
+    // Yiddish holds run on the real tables only (local.test.ts).
+    holdTake: () => { throw new Error("not in the memory store"); },
+    settleTake: () => { throw new Error("not in the memory store"); },
+    releaseTake: () => { throw new Error("not in the memory store"); },
+    refundJob: () => { throw new Error("not in the memory store"); },
   };
   return { s, store };
 }
 
-/** A base64 WAV body of [seconds] of audio, as the app sends it. */
+/** A base64 WAV body of [seconds] of audio, as the app sends it (WavWriter). */
 function audio(seconds: number): string {
-  return Buffer.alloc(44 + seconds * 32000).toString("base64");
+  return wav(seconds).toString("base64");
 }
 
 function transcribe(seconds: number, extra: Record<string, unknown> = {}, headers: Record<string, string> = { "X-Device-Id": device }) {
@@ -85,36 +122,56 @@ const ok = (async () => Response.json({ text: "hello" })) as unknown as typeof f
 
 describe("transcription server", () => {
   it("measures audio length from the WAV", () => {
-    expect(wavSeconds(audio(10))).toBeCloseTo(10, 5);
+    expect(audioLength(audio(10), "wav")).toBeCloseTo(10, 5);
+  });
+
+  it("measures Ogg Opus by its packets, whatever its size", () => {
+    expect(audioLength(oggOpus(10).toString("base64"), "ogg")).toBeCloseTo(10, 5);
+    expect(audioLength(oggOpus(10, 1).toString("base64"), "ogg")).toBeCloseTo(10, 5);
+    expect(audioLength(oggOpus(10, 300).toString("base64"), "ogg")).toBeCloseTo(10, 5);   // packets over a lacing value
+    expect(audioLength(oggOpus(10).toString("base64"), "wav")).toBeNull();
+    expect(audioLength(wav(10, 8000).toString("base64"), "wav")).toBeNull();
+    expect(audioLength(" " + audio(10), "wav")).toBeNull();
+  });
+
+  it("takes only the app's own plain WAV, so its size is its length (review 2026-11-25)", () => {
+    // The app's header over S/PDIF bursts of compressed sound: ffmpeg played 15 s of sound in a file whose size says 2.1 s.
+    expect(audioLength(withSyncs(wav(10), 0, 6144).toString("base64"), "wav")).toBeNull();
+    const madeUp = wav(10);
+    madeUp.writeUInt32LE(3_200_000, 28);   // a byte rate the app never writes
+    expect(audioLength(madeUp.toString("base64"), "wav")).toBeNull();
+    // One such start by chance in a real recording changes nothing.
+    expect(audioLength(withSyncs(wav(10), 3000).toString("base64"), "wav")).toBe(10);
+    expect(audioLength(withSyncs(wav(10), 0, 70000).toString("base64"), "wav")).toBe(10);   // past ffmpeg's first 64 KB
   });
 
   it("counts compressed audio by the seconds OpenRouter reports", () => {
-    expect(audioSeconds(JSON.stringify({ text: "hi", usage: { seconds: 13.74 } }), "AAAA", "ogg")).toBe(13.74);
+    expect(audioSeconds(JSON.stringify({ text: "hi", usage: { seconds: 13.74 } }), 1)).toBe(13.74);
   });
 
-  it("estimates Ogg audio from its size when OpenRouter reports no seconds", () => {
-    expect(audioSeconds(JSON.stringify({ text: "hi" }), Buffer.alloc(30000).toString("base64"), "ogg")).toBeCloseTo(10, 5);
+  it("counts the recording's own length when OpenRouter reports no seconds", () => {
+    expect(audioSeconds(JSON.stringify({ text: "hi" }), 10)).toBe(10);
   });
 
   it("counts plan seconds by what OpenRouter charged, at $0.10 an hour", () => {
     // 12 s at $0.10/h costs $0.000333: 12 plan seconds. The same 12 s at $0.54/h: 64.8.
-    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * 0.1 / 3600 } }), "", "ogg",
+    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * 0.1 / 3600 } }), 0,
       { id: "x", per_hour: 0.1 })).toBeCloseTo(12, 5);
-    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * 0.54 / 3600 } }), "", "ogg",
+    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * 0.54 / 3600 } }), 0,
       { id: "x", per_hour: 0.54 })).toBeCloseTo(64.8, 5);
   });
 
   it("counts paid hours 1:1 up to $0.15 an hour, faster above it", () => {
     const at = (perHour: number) => planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 12, cost: 12 * perHour / 3600 } }),
-      "", "ogg", { id: "x", per_hour: perHour }, 0.15);
+      0, { id: "x", per_hour: perHour }, 0.15);
     expect(at(0.06)).toBeCloseTo(12, 5);
     expect(at(0.15)).toBeCloseTo(12, 5);
     expect(at(0.27)).toBeCloseTo(21.6, 5);
   });
 
   it("uses the model's price when OpenRouter reports no cost, never less than one second a second", () => {
-    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), "", "ogg", { id: "x", per_hour: 0.27 })).toBeCloseTo(27, 5);
-    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), "", "ogg", { id: "x", per_hour: 0.06 })).toBeCloseTo(10, 5);
+    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), 0, { id: "x", per_hour: 0.27 })).toBeCloseTo(27, 5);
+    expect(planSeconds(JSON.stringify({ text: "hi", usage: { seconds: 10 } }), 0, { id: "x", per_hour: 0.06 })).toBeCloseTo(10, 5);
   });
 
   it("names months in UTC", () => {
@@ -592,16 +649,16 @@ describe("transcription server", () => {
       await store.addTopup("used", device, TOPUP_SECONDS, 1);
       await store.charge(device, "2026-11", "credit", TOPUP_SECONDS, null);
       await store.addTopup("new", device, TOPUP_SECONDS, 2);
-      expect(await store.takeBackTopups(["used"], 3)).toBe(1);
+      expect(await store.takeBackTopups(["used"], 3, 0, device)).toBe(1);
       expect(await credit()).toBe(TOPUP_SECONDS);   // nothing of the refunded one was left
       // One hour of three top-ups used: the first had 3 hours left, and those go; the newest is taken whole.
       const other = "b".repeat(64), creditOf = async () =>
         (await db.prepare("SELECT seconds FROM credit WHERE device = ?").bind(other).first<{ seconds: number }>())!.seconds;
       for (const [t, at] of [["x", 10], ["y", 11], ["z", 12]] as const) await store.addTopup(t, other, TOPUP_SECONDS, at);
       await store.charge(other, "2026-11", "credit", 3600, null);
-      await store.takeBackTopups(["x"], 13);
+      await store.takeBackTopups(["x"], 13, 0, other);
       expect(await creditOf()).toBe(2 * TOPUP_SECONDS);
-      await store.takeBackTopups(["z", "z"], 14);
+      await store.takeBackTopups(["z", "z"], 14, 0, other);
       expect(await creditOf()).toBe(TOPUP_SECONDS);
     });
   });

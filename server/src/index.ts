@@ -16,6 +16,14 @@
  * The OpenRouter key has its own monthly spending limit set on openrouter.ai, which caps the
  * total cost even if someone fakes many phones.
  *
+ * Each recording holds its length, read from the audio itself (audioLength), on what pays for it before it is
+ * sent (Store.reserve), so many recordings at once can't all pass on the same last second; OpenRouter's measured
+ * length replaces it afterwards, in work that goes on after the phone hangs up, and a hold that work never settled is
+ * given back (RECORDING_RUNS_MS). OpenRouter gets only what the app sends (forwardedBody). Optional limits,
+ * all off until set (review, 2026-11-25): OPENROUTER_PAID_KEY, a key just for phones that pay, so free
+ * or given use reaching OPENROUTER_KEY's limit doesn't stop them; MAX_RECORDING_SECONDS; and the rate
+ * limits DEVICE_LIMITER (recordings and purchases per phone) and ADDRESS_LIMITER (phone checks per address).
+ *
  * Only the real Play app may use it (Isaac, 2026-11-22): the app is open source, so anyone could
  * otherwise send made-up device IDs from a computer and get free minutes forever. Once per install
  * the app asks Google Play Integrity to vouch for it (POST /v1/register) and gets a device token
@@ -48,13 +56,16 @@
  *   GET /.well-known/assetlinks.json   for nuchemweber.com (route in wrangler.jsonc), so Android opens
  *                            the access links (https://nuchemweber.com/wordforword/a/?c=...) in the app.
  *
- * The Worker in front of the Yiddish model asks this server before each of the app's Yiddish takes
- * and counts the take afterwards, through the RPC entrypoint in worker.ts (yiddishCheck and
- * yiddishCharge below), which isn't on the internet.
+ * The Worker in front of the Yiddish model asks this server before each of the app's Yiddish takes,
+ * which holds the take's time, and counts the take afterwards by the length the model server
+ * measured, through the RPC entrypoint in worker.ts (yiddishCheck, yiddishCharge, yiddishRelease and
+ * yiddishRefund below), which isn't on the internet.
  */
 
-import { decodeIntegrity, PACKAGE, verify, voidedPurchases, type IntegrityPayload, type Verified } from "./google";
-import { d1Store, usagePeriod, type Account, type Bucket, type Grant, type ModelChoice, type Store, type Sub } from "./store";
+import { decodeIntegrity, PACKAGE, productState, verify, VOIDED_WINDOW_MS, voidedPurchases, type IntegrityPayload,
+  type Verified } from "./google";
+import { d1Store, noTable, usagePeriod, type Account, type Bucket, type Grant, type Hold, type ModelChoice, type StaleBefore,
+  type Store, type Sub } from "./store";
 
 export interface Env {
   DB: D1Database;
@@ -66,6 +77,17 @@ export interface Env {
   DEVICE_TOKEN_SECRET?: string;
   /** "true" once every call must carry a device token from /v1/register. */
   REQUIRE_INTEGRITY?: string;
+  /**
+   * Optional second OpenRouter key, with its own limit on openrouter.ai, for phones whose subscription pays
+   * now (review, 2026-11-25): with one key for everyone, free or given use that reaches the key's limit
+   * stops paying subscribers too. Unset: every call uses OPENROUTER_KEY, as before.
+   */
+  OPENROUTER_PAID_KEY?: string;
+  /** Optional: the longest recording one call may send, in seconds of audio, estimated from its size. Unset: no limit. */
+  MAX_RECORDING_SECONDS?: string;
+  /** Optional rate limits (wrangler.jsonc "ratelimits"): recordings and purchases per phone, phone checks per address. */
+  DEVICE_LIMITER?: RateLimit;
+  ADDRESS_LIMITER?: RateLimit;
 }
 
 /** The Play products (Play Console, Monetize). */
@@ -85,29 +107,121 @@ export function monthOf(date: Date): string {
   return date.toISOString().slice(0, 7);
 }
 
+/** Base64's 64 letters, for reading a recording where needed instead of copying it whole. "=" (padding) reads as 0. */
+const B64 = (() => {
+  const t = new Uint8Array(128);
+  [..."ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"].forEach((c, i) => { t[c.charCodeAt(0)] = i; });
+  return t;
+})();
+
+interface Bytes { length: number; at(i: number): number }
+
 /**
- * Seconds of audio in a base64 WAV the app sent: 16 kHz, 16-bit mono is 32,000 bytes a
- * second, after a 44-byte header.
+ * The bytes of [s], read one at a time where they are needed (a recording can be 25 MB). Null when [s] isn't plain
+ * base64: a decoder that skips stray letters, as OpenRouter's might, would read other bytes from it than this server.
  */
-export function wavSeconds(base64: string): number {
-  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
-  const bytes = (base64.length * 3) / 4 - padding;
-  return Math.max(0, bytes - 44) / 32000;
+function base64Bytes(s: string): Bytes | null {
+  if (s.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(s)) return null;
+  const v = (k: number) => B64[s.charCodeAt(k)];
+  return {
+    length: s.length / 4 * 3 - (s.endsWith("==") ? 2 : s.endsWith("=") ? 1 : 0),
+    at(i) {
+      const o = Math.floor(i / 3) * 4, r = i % 3;
+      return (r === 0 ? v(o) << 2 | v(o + 1) >> 4 : r === 1 ? v(o + 1) << 4 | v(o + 2) >> 2 : v(o + 2) << 6 | v(o + 3)) & 255;
+    },
+  };
+}
+
+const tagAt = (b: Bytes, at: number, tag: string) => [...tag].every((c, k) => b.at(at + k) === c.charCodeAt(0));
+const u16At = (b: Bytes, at: number) => b.at(at) | b.at(at + 1) << 8;
+const u32At = (b: Bytes, at: number) => (u16At(b, at) | u16At(b, at + 2) << 16) >>> 0;
+
+/**
+ * Seconds of sound in the app's own WAV (WavWriter): a 44-byte header for one channel of 16-bit PCM at 16,000 samples a
+ * second, 32,000 bytes a second after it. Null for any other WAV, whose sound can be longer than its size says (a
+ * header saying 8,000 samples a second plays twice as long, another codec longer still), and for this header over
+ * S/PDIF bursts of compressed sound (IEC 61937): ffmpeg finds them in a PCM WAV's first 64 KB of sound and plays the
+ * sound in them (review 2026-11-25: 15 s of sound in a file whose size says 2.1 s). Two of their sync words is the
+ * least ffmpeg takes for them; one in a real recording by chance changes nothing.
+ */
+function appWavSeconds(b: Bytes): number | null {
+  if (b.length < 44 || !tagAt(b, 0, "RIFF") || !tagAt(b, 8, "WAVEfmt ") || u32At(b, 16) !== 16 || u16At(b, 20) !== 1 ||
+      u16At(b, 22) !== 1 || u32At(b, 24) !== 16000 || u32At(b, 28) !== 32000 || u16At(b, 32) !== 2 ||
+      u16At(b, 34) !== 16 || !tagAt(b, 36, "data")) return null;
+  let syncs = 0;
+  for (let i = 44, end = Math.min(b.length - 3, 44 + 65536); i < end; i++)
+    if (b.at(i) === 0x72 && b.at(i + 1) === 0xf8 && b.at(i + 2) === 0x1f && b.at(i + 3) === 0x4e && ++syncs === 2) return null;
+  return (b.length - 44) / 32000;
 }
 
 /**
- * Seconds of audio in one recording. Since 0.9.7 the app sends small Ogg Opus audio instead of
- * WAV (Isaac, 2026-11-19: "as fast as possible"), so the length comes from OpenRouter's answer
- * (usage.seconds). Without it: WAV from its size, Ogg at the app's 24 kbit/s (3,000 bytes a second).
+ * 48 kHz samples one Opus packet plays, from its first two bytes (RFC 6716 3.1; the app's OggWriter.samples48k). An empty
+ * or malformed packet counts as the most one packet can hold, 120 ms (5,760), the most a decoder plays in its place.
  */
-export function audioSeconds(responseText: string, base64: string, format: string): number {
+function opusSamples(toc: number, count: number, size: number): number {
+  const config = toc >> 3, code = toc & 3;
+  const frame = config < 12 ? [480, 960, 1920, 2880][config & 3] : config < 16 ? [480, 960][config & 1] : [120, 240, 480, 960][config & 3];
+  const n = size === 0 ? 0 : frame * (code === 0 ? 1 : code < 3 ? 2 : size > 1 ? count & 63 : 0);
+  return n > 0 && n <= 5760 ? n : 5760;
+}
+
+/**
+ * Seconds of sound in one Ogg Opus stream (RFC 7845) as a decoder plays it: the sum of its packets' lengths, never the
+ * times written in its pages, which the sender chooses. Null unless the bytes are, end to end, the pages of one stream
+ * whose first two packets are Opus's headers, as the app's OggWriter writes them.
+ */
+function oggOpusSeconds(b: Bytes): number | null {
+  let at = 0, serial = -1, packets = 0, samples = 0, start = -1, size = 0;
+  const packet = (): boolean => {
+    if (packets === 0 ? !(size >= 19 && tagAt(b, start, "OpusHead")) : packets === 1 && !(size >= 8 && tagAt(b, start, "OpusTags"))) return false;
+    if (packets >= 2) samples += opusSamples(size ? b.at(start) : 0, size > 1 ? b.at(start + 1) : 0, size);
+    packets++;
+    start = -1;
+    return true;
+  };
+  while (at < b.length) {
+    if (at + 27 > b.length || !tagAt(b, at, "OggS") || b.at(at + 4) !== 0) return null;
+    const flags = b.at(at + 5), id = u32At(b, at + 14), segments = b.at(at + 26);
+    // One stream: the first page begins it, no later page begins another (a chained or second stream).
+    if (serial === -1 ? !(flags & 2) : id !== serial || (flags & 2) !== 0) return null;
+    serial = id;
+    let body = at + 27 + segments;
+    for (let k = 0; k < segments; k++) {
+      const lace = b.at(at + 27 + k);
+      if (start < 0) { start = body; size = 0; }
+      size += lace;
+      body += lace;
+      if (lace < 255 && !packet()) return null;
+    }
+    if (body > b.length) return null;
+    at = body;
+  }
+  if (start >= 0 && !packet()) return null;   // a packet the last page leaves open still counts
+  return packets >= 2 ? samples / 48000 : null;
+}
+
+/**
+ * Seconds of sound in a recording, read from the audio itself (review, 2026-11-25: it was guessed from the size at the
+ * app's 24 kbit/s, 3,000 bytes a second, and Opus can be far smaller per second: the app's own encoder makes silence
+ * about 12 times smaller, a hand-made file of 1-byte packets 24 times, so several such recordings were held a fraction
+ * of their length and all passed on the last minute, and MAX_RECORDING_SECONDS let them through). [format] is what the
+ * app sends: "ogg" (one Ogg Opus stream, OggWriter) or "wav" (WavWriter). Null for anything else.
+ */
+export function audioLength(base64: string, format: string): number | null {
+  const b = base64Bytes(base64);
+  return !b ? null : format === "wav" ? appWavSeconds(b) : format === "ogg" ? oggOpusSeconds(b) : null;
+}
+
+/**
+ * Seconds of audio in one recording: what OpenRouter measured (usage.seconds), else [length], the recording's own
+ * length (audioLength).
+ */
+export function audioSeconds(responseText: string, length: number): number {
   try {
     const s = (JSON.parse(responseText) as { usage?: { seconds?: unknown } }).usage?.seconds;
     if (typeof s === "number" && s > 0) return s;
   } catch { /* fall through */ }
-  if (format === "wav") return wavSeconds(base64);
-  const padding = base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0;
-  return ((base64.length * 3) / 4 - padding) / 3000;
+  return length;
 }
 
 /**
@@ -115,15 +229,14 @@ export function audioSeconds(responseText: string, base64: string, format: strin
  * dollars an hour (what OpenRouter charged, usage.cost, at [base] an hour). A model at or under
  * [base] counts 1:1, so 10 paid hours are 10 real hours on any model up to $0.15 an hour.
  */
-export function planSeconds(responseText: string, base64: string, format: string, model: ModelChoice,
-                            base = FREE_BASE_PER_HOUR): number {
+export function planSeconds(responseText: string, length: number, model: ModelChoice, base = FREE_BASE_PER_HOUR): number {
   try {
     const cost = (JSON.parse(responseText) as { usage?: { cost?: unknown } }).usage?.cost;
     if (typeof cost === "number" && cost > 0) {
-      return Math.max(audioSeconds(responseText, base64, format), cost / base * 3600);
+      return Math.max(audioSeconds(responseText, length), cost / base * 3600);
     }
   } catch { /* fall through */ }
-  return audioSeconds(responseText, base64, format) * Math.max(1, (model.per_hour ?? base) / base);
+  return audioSeconds(responseText, length) * Math.max(1, (model.per_hour ?? base) / base);
 }
 
 /**
@@ -249,7 +362,9 @@ export async function refreshed(a: Account, env: Env, store: Store, device: stri
  * counted). Google lists such purchases in its Voided Purchases API for 30 days (voidedPurchases).
  * While [a] has bought hours left, it is asked at most once a day, after the answer went back, the same
  * as a paid subscription's refund check (recheckDue), so the call is no slower and a refund counts from
- * a later call. One answer covers every phone's top-ups.
+ * a later call. One answer covers the top-ups of every phone checked in the last 30 days. Google's list
+ * goes back only that far, so this phone's top-ups last checked before then are asked about one by one
+ * (review, 2026-11-25: a top-up refunded while no phone with bought hours called for 30 days kept them).
  */
 export async function takeBackRefunds(a: Account, env: Env, store: Store, device: string, now: number,
                                       fetcher: typeof fetch, defer?: (work: Promise<unknown>) => unknown): Promise<void> {
@@ -258,28 +373,80 @@ export async function takeBackRefunds(a: Account, env: Env, store: Store, device
   const work = (async () => {
     const checked = await store.topupsChecked(device);
     if (checked == null || now - checked < SILENT_GRACE_MS) return;
-    const taken = await store.takeBackTopups(await voidedPurchases(serviceAccount, fetcher, now), now);
+    const voided = await voidedPurchases(serviceAccount, fetcher, now);
+    const since = now - VOIDED_WINDOW_MS;
+    for (const token of await store.staleTopups(device, since)) {
+      if (await productState(serviceAccount, TOPUP, token, fetcher, now) === 1) voided.push(token);
+    }
+    const taken = await store.takeBackTopups(voided, now, since, device);
     if (taken) console.log("Refunded top-ups, hours left taken back:", taken);
   })().catch((e) => console.error("Top-up refund check failed:", e));
   if (defer) await defer(work); else await work;
 }
 
 /**
- * What pays for the next recording: hours given on the Access page first (so a gift never uses up
- * the free minutes or paid hours), then this month's free minutes, then the subscription's
- * hours, then bought hours (only while subscribed). Paying phones get the paid models even on
- * free minutes. Null when nothing is left.
+ * What may pay for the next recording, in the order it pays: hours given on the Access page first (so a
+ * gift never uses up the free minutes or paid hours), then this month's free minutes, then the
+ * subscription's hours, then bought hours (only while subscribed). Paying phones get the paid models
+ * even on free minutes. Empty when nothing is left. With [grantOnly] (no word from Google Play for the
+ * phone), only given hours.
  */
-export function choose(a: Account, now: number, free: number): { bucket: Bucket; paid: boolean } | null {
-  const paying = subscribed(a.sub, now);
+export function choices(a: Account, now: number, free: number, grantOnly = false): { bucket: Bucket; paid: boolean }[] {
+  const out: { bucket: Bucket; paid: boolean }[] = [];
   // Given hours get the paid models and count like paid hours.
-  if (grantLeft(a.grant)) return { bucket: "grant", paid: true };
-  if (a.freeUsed < free) return { bucket: "free", paid: paying };
-  if (!paying) return null;
-  if (a.sub!.used < SUB_SECONDS) return { bucket: "sub", paid: true };
-  if (a.credit > 0) return { bucket: "credit", paid: true };
-  return null;
+  if (grantLeft(a.grant)) out.push({ bucket: "grant", paid: true });
+  if (grantOnly) return out;
+  const paying = subscribed(a.sub, now);
+  if (a.freeUsed < free) out.push({ bucket: "free", paid: paying });
+  if (paying && a.sub!.used < SUB_SECONDS) out.push({ bucket: "sub", paid: true });
+  if (paying && a.credit > 0) out.push({ bucket: "credit", paid: true });
+  return out;
 }
+
+/** What pays for the next recording (the first of choices), or null when nothing is left. */
+export function choose(a: Account, now: number, free: number): { bucket: Bucket; paid: boolean } | null {
+  return choices(a, now, free)[0] ?? null;
+}
+
+/** The most [bucket] holds in plan seconds, for Store.reserve; null for no limit (unlimited hours, bought hours). */
+function limitOf(bucket: Bucket, a: Account, free: number): number | null {
+  return bucket === "free" ? free : bucket === "grant" ? a.grant?.seconds ?? null : bucket === "sub" ? SUB_SECONDS : null;
+}
+
+/** What a phone puts in a recording's body (TranscriberClient.buildBodyJson). */
+interface TranscriptionBody {
+  model?: unknown; language?: unknown; input_audio?: { data?: unknown; format?: unknown }; provider?: unknown;
+}
+
+/**
+ * The request OpenRouter gets for [model]: only what the app sends, the audio, its format and language and
+ * each provider's verbatim switch (review, 2026-11-25: everything else in the phone's body went on to
+ * OpenRouter with the server's key, so a phone could pick OpenRouter's providers and fallbacks, turn on
+ * extras that providers charge more for, or add a link for the provider to download audio from).
+ */
+export function forwardedBody(body: TranscriptionBody, data: string, format: string, model: string): Record<string, unknown> {
+  const out: Record<string, unknown> = { model, input_audio: { data, format } };
+  if (typeof body.language === "string") out.language = body.language;
+  const options = styleOptions(body.provider);
+  if (options) out.provider = { options };
+  return out;
+}
+
+/** The app's verbatim switch for each provider (TranscriberClient.styleOptions), each only as the app sends it. */
+function styleOptions(provider: unknown): Record<string, unknown> | null {
+  const o = (provider as { options?: Record<string, Record<string, unknown> | undefined> } | null)?.options;
+  if (!o || typeof o !== "object") return null;
+  const out: Record<string, unknown> = {};
+  const style = (o.azure?.enhancedMode as { modelOptions?: { transcribeStyle?: unknown } } | undefined)?.modelOptions?.transcribeStyle;
+  if (style === "verbatim" || style === "clean") out.azure = { enhancedMode: { modelOptions: { transcribeStyle: style } } };
+  if (typeof o.elevenlabs?.no_verbatim === "boolean") out.elevenlabs = { no_verbatim: o.elevenlabs.no_verbatim };
+  if (typeof o.deepgram?.filler_words === "boolean") out.deepgram = { filler_words: o.deepgram.filler_words };
+  if (typeof o.assemblyai?.disfluencies === "boolean") out.assemblyai = { disfluencies: o.assemblyai.disfluencies };
+  return Object.keys(out).length ? out : null;
+}
+
+/** The audio formats the app sends: Ogg Opus, and WAV below Android 10 or when a model refuses the Ogg. */
+const FORMATS = ["ogg", "wav"];
 
 function error(status: number, message: string, code?: string): Response {
   return Response.json({ error: { message, ...(code ? { code } : {}) } }, { status });
@@ -376,8 +543,19 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   const free = Number(env.FREE_SECONDS_PER_MONTH);
   const month = monthOf(now);
   const later = async (work: Promise<unknown>) => { if (defer) defer(work); else await work; };
+  const post = request.method === "POST";
 
-  if (url.pathname === "/v1/register" && request.method === "POST") {
+  // Optional rate limits, before any database read or call to Google or OpenRouter. The phone check takes
+  // anyone, so it counts per address; the others per phone.
+  const limit = url.pathname === "/v1/register" && post
+    ? { by: env.ADDRESS_LIMITER, key: "register:" + (request.headers.get("CF-Connecting-IP") ?? "") }
+    : (url.pathname === "/v1/transcriptions" || url.pathname === "/v1/purchases") && post && device
+    ? { by: env.DEVICE_LIMITER, key: "phone:" + device } : null;
+  if (limit?.by && !(await limit.by.limit({ key: limit.key })).success) {
+    return error(429, "Too many requests right now. Wait a moment and try again.", "rate_limited");
+  }
+
+  if (url.pathname === "/v1/register" && post) {
     if (!device) return error(400, "Missing device ID.");
     const body = await request.json().catch(() => ({})) as Record<string, unknown>;
     const token = body.integrity_token;
@@ -410,7 +588,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   const code = accessCode(request.headers.get("X-Access-Code"));
   // Loaded before the device check: a valid access code stands in for a device token.
   let account = device && ["/v1/usage", "/v1/purchases", "/v1/transcriptions"].includes(url.pathname)
-    ? await store.account(device, month, code) : null;
+    ? await store.account(device, month, code, staleBefore(now)) : null;
   // Without a device token, given hours (a code's or the phone's own) still work, but only they do.
   let grantOnly = false;
   if (device && account) {
@@ -424,8 +602,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
       await takeBackRefunds(account, env, store, device, now.getTime(), fetcher, later);
     }
   }
-  const pickFor = (a: Account) => grantOnly ? (grantLeft(a.grant) ? { bucket: "grant" as Bucket, paid: true } : null)
-    : choose(a, now.getTime(), free);
+  const pickFor = (a: Account) => choices(a, now.getTime(), free, grantOnly)[0] ?? null;
 
   if (url.pathname === "/v1/usage" && request.method === "GET") {
     if (!device || !account) return error(400, "Missing device ID.");
@@ -465,7 +642,7 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   if (url.pathname !== "/v1/transcriptions" || request.method !== "POST") return error(404, "Not found.");
   if (!device) return error(400, "Missing device ID.");
 
-  let body: { model?: unknown; language?: unknown; input_audio?: { data?: unknown; format?: unknown } };
+  let body: TranscriptionBody;
   try {
     body = await request.json();
   } catch {
@@ -473,48 +650,112 @@ export async function handle(request: Request, env: Env, store: Store, now = new
   }
   const audio = body.input_audio?.data;
   if (typeof audio !== "string" || audio.length === 0) return error(400, "No audio in the request.");
-  const format = typeof body.input_audio?.format === "string" ? body.input_audio.format : "wav";
+  const format = body.input_audio?.format ?? "wav";
+  if (typeof format !== "string" || !FORMATS.includes(format)) return error(400, "Unsupported audio format.");
+  // The recording's length from the audio itself, before anything is sent; what OpenRouter measures replaces it
+  // afterwards. Audio this server can't measure is refused (the app sends an Ogg it refuses again as WAV).
+  const length = audioLength(audio, format);
+  if (length == null) return error(400, "Unsupported audio format.");
+  const longest = Number(env.MAX_RECORDING_SECONDS);
+  if (env.MAX_RECORDING_SECONDS && Number.isFinite(longest) && length > longest) {
+    return error(413, "That recording is too long to send in one piece. Try a shorter one.", "too_long");
+  }
 
   const a = account ?? await store.account(device, month, code);
-  const pick = pickFor(a);
-  if (!pick) return outOfTime(a, now.getTime(), free);
+  // Holds the recording's length on what pays, in one statement that refuses once nothing is left, before the audio
+  // goes out (review, 2026-11-25: the time was only checked before and counted after, so many recordings sent at
+  // once on a phone's, a code's or a subscription's last second were all typed and paid for by Isaac). The hold is
+  // also a row (table recording_holds), given back if no work ever settles it (RECORDING_RUNS_MS).
+  // Its time is when it is held, after the upload, when the app's 70 s wait for the answer starts.
+  const id = crypto.randomUUID(), at = Date.now();
+  let pick: { bucket: Bucket; paid: boolean } | null = null, hold: Hold | null = null;
+  for (const p of choices(a, now.getTime(), free, grantOnly)) {
+    const h: Hold = { id, device, month, bucket: p.bucket, seconds: length, sub: a.sub, grant: a.grant, at };
+    if (await store.reserve(h, limitOf(p.bucket, a, free))) { pick = p; hold = h; break; }
+  }
+  if (!pick || !hold) return outOfTime(a, now.getTime(), free);
+  const held: Hold = hold, models = pick.paid ? a.models.paid : a.models.free;
 
+  const key = env.OPENROUTER_PAID_KEY && !grantOnly && subscribed(a.sub, now.getTime()) ? env.OPENROUTER_PAID_KEY : env.OPENROUTER_KEY;
   const send = (b: object) => fetcher(OPENROUTER_URL, {
     method: "POST",
-    headers: { "Authorization": "Bearer " + env.OPENROUTER_KEY, "Content-Type": "application/json", "X-Title": "Word for Word" },
+    headers: { "Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Title": "Word for Word" },
     body: JSON.stringify(b),
   });
 
   // The main model, then each backup when the one before is missing, busy or down.
-  let status = 502, text = JSON.stringify({ error: { message: "No model answered." } }), used: ModelChoice | null = null;
-  for (const model of pick.paid ? a.models.paid : a.models.free) {
-    let b: Record<string, unknown> = { ...body, model: model.id };
-    let res = await send(b);
-    text = await res.text();
-    if ("language" in b && (res.status === 400 || res.status === 422) && !text.includes("does not exist")) {
-      // The model refused the language: send again and let it guess.
-      const { language: _drop, ...rest } = b;
-      b = rest;
-      res = await send(b);
-      text = await res.text();
+  const answer = (async () => {
+    let status = 502, text = JSON.stringify({ error: { message: "No model answered." } }), used: ModelChoice | null = null;
+    try {
+      for (const model of models) {
+        let b = forwardedBody(body, audio, format, model.id);
+        let res = await send(b);
+        text = await res.text();
+        if ("language" in b && (res.status === 400 || res.status === 422) && !text.includes("does not exist")) {
+          // The model refused the language: send again and let it guess.
+          const { language: _drop, ...rest } = b;
+          b = rest;
+          res = await send(b);
+          text = await res.text();
+        }
+        status = res.status;
+        used = model;
+        if (res.ok || !tryAnother(res.status, text)) break;
+      }
+    } catch (e) {
+      console.error("OpenRouter couldn't be reached:", e instanceof Error ? e.message : String(e));
+      status = 502;
+      text = JSON.stringify({ error: { message: "No model answered." } });
     }
-    status = res.status;
-    used = model;
-    if (res.ok || !tryAnother(res.status, text)) break;
-  }
-
-  // Only audio that came back as text counts. The count is saved after the answer goes back.
-  if (status >= 200 && status < 300 && used) {
-    await later(store.charge(device, month, pick.bucket, planSeconds(text, audio, format, used,
-      pick.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR), a.sub, a.grant));
-  }
+    return { status, text, used };
+  })();
+  // OpenRouter and then the hold's count, handed to Cloudflare as one piece of work right after the hold (ctx.waitUntil),
+  // so it ends even when the phone hangs up first (review, 2026-11-25: the app hangs up after 70 s without an answer or
+  // when its connection drops, Cloudflare may then stop the request's own work, and the hold stayed, so the recording
+  // sent again was counted again). Cloudflare's docs (Context, waitUntil; Limits, Duration; read 2026-11-25): waitUntil
+  // runs up to 30 s after the answer is sent or the phone hangs up, and a crash, resource pressure or a shutdown can stop
+  // it sooner, so a hold no work settled is given back later (RECORDING_RUNS_MS). Only audio that came back as text
+  // counts: the length held becomes what OpenRouter measured, or is given back, after the answer goes back.
+  await later(answer.then(async ({ status, text, used }) => {
+    const typed = status >= 200 && status < 300 ? used : null;
+    const charged = typed ? planSeconds(text, length, typed, held.bucket === "free" ? FREE_BASE_PER_HOUR : PAID_BASE_PER_HOUR) : 0;
+    // Bought hours held below zero stay there until the next top-up, which counts from zero (Store.addTopup): clipped to
+    // zero here, another recording's hold still out in them came back as hours nobody bought (Codex review of 52c15aa).
+    await store.settle(held, charged);
+  }));
+  const { status, text, used } = await answer;
   return new Response(text, { status, headers: { "Content-Type": "application/json", ...(used ? { "X-Model": used.id } : {}) } });
+}
+
+/**
+ * How long a recording's request can still be running after its hold (ms): the app waits 70 s for the answer
+ * (TranscriberClient.kt, readTimeout) and then hangs up, and Cloudflare gives the work handed to ctx.waitUntil up to 30 s
+ * after that. A hold older than this that no work settled (Cloudflare stopped it: a crash, a restart) is given back on
+ * the phone's next request (review, 2026-11-25: the phone lost that time, and the recording sent again was counted
+ * again). An answer that still comes (a hand-made request that kept waiting) is counted once, all of it (Store.settle).
+ */
+export const RECORDING_RUNS_MS = (70 + 30) * 1000;
+
+/** The times before which the phone's holds whose work never ended are given back (Store.account). */
+function staleBefore(now: Date): StaleBefore {
+  return { takes: now.getTime() - TAKE_RUNS_MS, recordings: now.getTime() - RECORDING_RUNS_MS };
 }
 
 /** How many plan seconds a second of Yiddish audio counts for (AGENTS.local.md). */
 export const YIDDISH_WEIGHT = 2;
 
-export type CheckAnswer = { ok: true } | { ok: false; status: number; code: string; message: string };
+/**
+ * How long a Yiddish take can still be running after its hold (ms): the app waits 180 s for a take's answer
+ * (YiddishServer.kt, readTimeout), and Cloudflare gives a Worker 30 s after its answer, or after the phone has gone, to
+ * count or give back (ctx.waitUntil). A hold older than this whose take never settled (its Worker stopped: the phone's
+ * connection dropped, a deploy) is given back on the phone's next request (third review, 2026-11-25: it was counted for
+ * good). A slower take (a long upload, a hand-made request) is given back early and still counted once when its result
+ * comes (settleTake).
+ */
+export const TAKE_RUNS_MS = (180 + 30) * 1000;
+
+/** [held]: seconds of sound the take's hold covers (only when it was held), the most the model server may type. */
+export type CheckAnswer = { ok: true; held?: number } | { ok: false; status: number; code: string; message: string };
 
 /**
  * Whether the app's Yiddish take may go to the Yiddish model (Isaac, 2026-11-24: "I don't want
@@ -523,16 +764,28 @@ export type CheckAnswer = { ok: true } | { ok: false; status: number; code: stri
  * whatever REQUIRE_INTEGRITY says) with time left in the same free minutes and hours as
  * everything else. Builds not from Google Play never get a token, so they get Yiddish only with an
  * access code ([rawCode], from the Access page), which also stands in for the token.
+ *
+ * With [hold] (the yiddishtry Worker's id for the take and its length as the Worker estimated it from its size), the
+ * take's time is also held before it is sent (review, 2026-11-25: checked once before and counted after, every take
+ * started on a phone's last second was typed, on the paid cloud copy when the PC was busy, and counted past the
+ * phone's hours). The hold is the length in whole seconds and one more (as yiddishvoicetotext.com's needFor holds a
+ * file), twice over, all of it on the first of the phone's hours with that much left, in one statement, so takes at
+ * the same moment can't share the last seconds. A take that doesn't fit is refused before it is sent, so a phone is
+ * never typed more than its hours can pay. The answer's [held] goes to the model server (x-max-seconds), which
+ * refuses a longer take before typing it; yiddishCharge then counts what the model server measured in place of the
+ * hold, or yiddishRelease gives the hold back. Without [hold] (a yiddishtry Worker from before holds) or without the
+ * table, this only checks, as before.
  */
 export async function yiddishCheck(env: Env, store: Store, device: unknown, token: unknown,
                                    now = new Date(), rawCode: unknown = null,
                                    fetcher: typeof fetch = fetch,
-                                   defer?: (work: Promise<unknown>) => unknown): Promise<CheckAnswer> {
+                                   defer?: (work: Promise<unknown>) => unknown,
+                                   hold?: { take: unknown; seconds: unknown }): Promise<CheckAnswer> {
   if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) {
     return { ok: false, status: 400, code: "no_device", message: "Missing device ID." };
   }
   const free = Number(env.FREE_SECONDS_PER_MONTH);
-  let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null));
+  let a = await store.account(device, monthOf(now), accessCode(typeof rawCode === "string" ? rawCode : null), staleBefore(now));
   const vouched = typeof token === "string" && !!env.DEVICE_TOKEN_SECRET && await tokenMatches(env.DEVICE_TOKEN_SECRET, device, token);
   if (vouched) {
     a = await refreshed(a, env, store, device, now.getTime(), fetcher, defer);
@@ -542,15 +795,39 @@ export async function yiddishCheck(env: Env, store: Store, device: unknown, toke
     return { ok: false, status: 403, code: "device_unverified", message: "Google Play couldn't confirm this phone." };
   }
   // Without Google Play's word for the phone, only the given hours count, not its free minutes.
-  if (vouched ? choose(a, now.getTime(), free) : grantLeft(a.grant)) return { ok: true };
+  const options = choices(a, now.getTime(), free, !vouched);
+  const take = hold?.take, estimate = hold?.seconds;
+  if (options.length && typeof take === "string" && take && typeof estimate === "number" && estimate >= 0 && Number.isFinite(estimate)) {
+    const sound = Math.ceil(estimate) + 1;
+    try {
+      for (const p of options) {
+        if (await store.holdTake(take, device, monthOf(now), p.bucket, sound * YIDDISH_WEIGHT, limitOf(p.bucket, a, free), a.sub,
+                                 a.grant, now.getTime())) return { ok: true, held: sound };
+      }
+    } catch (e) {
+      if (!noTable(e)) throw e;
+      return { ok: true };
+    }
+  } else if (options.length) return { ok: true };
   const out = await outOfTime(a, now.getTime(), free).json() as { error: { message: string; code: string } };
   return { ok: false, status: 402, code: out.error.code, message: out.error.message };
 }
 
-/** Counts [seconds] of audio the Yiddish model typed, at YIDDISH_WEIGHT, on whatever pays next. */
+/**
+ * Counts [seconds] of audio the Yiddish model typed, at YIDDISH_WEIGHT. A take yiddishCheck held ([take]) is counted
+ * the length the model server measured in place of its hold, once, keeping [job] for a shared file so its failure can
+ * give it back (yiddishRefund). Otherwise (a yiddishtry Worker from before holds) on whatever pays next.
+ */
 export async function yiddishCharge(env: Env, store: Store, device: unknown, seconds: unknown,
-                                    now = new Date(), rawCode: unknown = null): Promise<void> {
+                                    now = new Date(), rawCode: unknown = null, take: unknown = null,
+                                    job: unknown = null): Promise<void> {
   if (typeof device !== "string" || !/^[0-9a-f]{64}$/.test(device)) return;
+  if (typeof take === "string" && take) {
+    if (typeof seconds === "number" && seconds >= 0 && Number.isFinite(seconds)) {
+      await store.settleTake(take, seconds * YIDDISH_WEIGHT, typeof job === "string" && job ? job : null);
+    } else await store.releaseTake(take);
+    return;
+  }
   if (typeof seconds !== "number" || !(seconds > 0)) return;
   const month = monthOf(now);
   const a = await store.account(device, month, accessCode(typeof rawCode === "string" ? rawCode : null));
@@ -558,6 +835,20 @@ export async function yiddishCharge(env: Env, store: Store, device: unknown, sec
   // Nothing left now: the take was allowed when it started, so it still counts.
   const bucket = pick?.bucket ?? (a.grant ? "grant" : subscribed(a.sub, now.getTime()) ? "sub" : "free");
   await store.charge(device, month, bucket, seconds * YIDDISH_WEIGHT, a.sub, a.grant);
+}
+
+/** Gives back what yiddishCheck held for [take], once: the take wasn't typed (refused, failed, or nobody answered). */
+export async function yiddishRelease(store: Store, take: unknown): Promise<void> {
+  if (typeof take === "string" && take) await store.releaseTake(take);
+}
+
+/**
+ * Gives back what a shared file was counted when its job started, once, when the model server says that job [job]
+ * failed (the yiddishtry Worker sees it in the job's status). A job never counted here, such as the try page's,
+ * changes nothing.
+ */
+export async function yiddishRefund(store: Store, job: unknown): Promise<void> {
+  if (typeof job === "string" && job) await store.refundJob(job);
 }
 
 export default {

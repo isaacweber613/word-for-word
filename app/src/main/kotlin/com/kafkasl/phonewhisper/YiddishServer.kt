@@ -214,7 +214,10 @@ object YiddishServer {
 
     private fun failure(context: Context, code: Int, json: JSONObject?): TranscriberClient.Result {
         val errorCode = json?.optString("code").orEmpty()
-        FreeMinutes.noTimeLeft(context, errorCode)
+        // The server refuses a take that doesn't fit what is left (it holds a take's whole length first), so this
+        // doesn't mean nothing is left: its own answer says (third review, 2026-11-25: marking the phone out here
+        // stopped every Yiddish take until the app asked the server again).
+        if (errorCode in FreeMinutes.OUT_CODES) FreeMinutes.usage(context) { }
         val msg = when {
             code == 503 -> "The Yiddish model is offline right now (the computer running it is off)."
             errorCode == "free_minutes_used" -> FreeMinutes.OUT_FREE

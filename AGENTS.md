@@ -178,6 +178,39 @@ answers like OpenRouter. GitHub builds have no server URL and always need the pe
   once a day, after the answer has gone back (Google lists refunded, canceled and charged-back one-time
   purchases there for 30 days; one answer covers every phone). Needs two new `topups` columns in D1
   before the deploy (`schema.sql`); without them only this check fails, in the Worker log.
+- Security and money review of the whole server (2026-11-25, not deployed yet). `server/test/local.test.ts`
+  attacks a local run (`test/local-run.ts`: the bundled Worker in Miniflare with a local D1 from `schema.sql`;
+  every outside call goes to stand-ins, so no test can reach Google or OpenRouter). Fixed, each failing first:
+  time was only checked before a recording and counted after it, so many recordings at once on a phone's, a
+  code's or a subscription's last second were all typed; now each holds its length first in one
+  conditional statement (`Store.reserve`) and OpenRouter's measured length replaces it afterwards. OpenRouter's call and
+  that count are one piece of work handed to `ctx.waitUntil` right after the hold (fourth review, Fable and Gemini Neon:
+  only the request itself counted it, so a phone that hung up, after the app's 70 s wait or a dropped connection, kept
+  the hold, and the recording sent again was counted again). Cloudflare's docs give that work up to 30 s after the
+  hang-up and say a crash or a restart can stop it sooner, so each hold is also a row (`recording_holds`), given back on
+  the phone's next request once older than 100 s (`RECORDING_RUNS_MS`); an answer that still comes is counted once,
+  all of it. The table goes into D1 before the deploy; without it recordings are held and counted as before. The length is read from
+  the audio itself (`audioLength`: the Opus packets of the app's Ogg, or the app's 44-byte 16 kHz WAV without S/PDIF
+  bursts, which ffmpeg plays as compressed sound, 15 s in a file whose size says 2.1 s; anything else is
+  refused with 400, and the app sends a refused Ogg again as WAV), not guessed from the size: Opus can be far smaller per
+  second than the app's 24 kbit/s (libopus at the app's settings, as Android's encoder runs it: speech 13% smaller,
+  silence 12.6 times; a hand-made file of 1-byte packets 24 times), so such recordings were held a fraction of their length, five at once passed on a phone's last minute, and
+  `MAX_RECORDING_SECONDS` let ten minutes through as 26 s (third review, 2026-11-25). Bought hours a
+  recording on their last seconds ran over stay below zero until the next top-up, which counts from zero, so it is
+  never a debt (clipping them to zero at each recording gave back hours nobody bought when two overlapped). The phone's
+  whole body went to OpenRouter on the server's key (provider routing, paid extras, a download link); now only
+  the audio, its format (ogg or wav), language and the app's verbatim switches. A failed write could leave a
+  bought top-up counted without its hours; now one transaction. A refund older than Google's 30-day list
+  kept its hours; now old top-ups are asked about one by one. Optional, off until Isaac sets them:
+  `OPENROUTER_PAID_KEY` (a second key with its own limit for phones that pay, so free or given use reaching
+  the main key's limit can't stop subscribers), `MAX_RECORDING_SECONDS`, and the rate limits `DEVICE_LIMITER`
+  and `ADDRESS_LIMITER` (commented in `wrangler.jsonc`). Yiddish takes on the last second (same day, with
+  yiddish-stt's yiddishtry Worker): see "Yiddish takes" below. Still open: one rooted phone with the real Play
+  app can have Play Integrity vouch for any number of made-up device IDs, each with free minutes, since
+  basic integrity is enough (Google's optional recent device activity and device recall verdicts are the
+  documented answers); anyone can call `/v1/register`, and each call with a token makes one Play Integrity
+  decode, whose quota is 10,000 a day for the whole app; device tokens and subscription purchase tokens work
+  on any phone that has them, and a code is shared by design.
 
 ## Paid plan (agreed with Isaac 2026-11-20, built the same day)
 
@@ -315,7 +348,27 @@ Yiddish take sends `X-Device-Id` and `X-Device-Token`, and the `yiddishtry` Work
 server (RPC entrypoint `Yiddish` in `server/src/worker.ts`, service binding `WFW`) while the audio
 is still arriving: the phone needs a device token from Play Integrity, whatever
 `REQUIRE_INTEGRITY` says, and time left in its free minutes or hours, whatever key is typed. A take
-that comes back with words is counted there (`yiddishCheck`, `yiddishCharge`). No phone is exempt
+that comes back with words is counted there (`yiddishCheck`, `yiddishCharge`).
+Holds (review, 2026-11-25, not deployed yet): checked once before and counted after, every take started on a
+phone's last second was typed, on the paid cloud copy when the PC was busy (test/yiddish-e2e.test.ts, the real
+yiddishtry Worker and this server in Miniflare: 4 of 4 takes at once on one second left were typed). Now the
+yiddishtry Worker gives each take an id and its length from its size, and `yiddishCheck` holds that length in whole
+seconds plus one, twice over, all of it on the first hours with that much left, in one statement (table
+`yiddish_takes`); a take that doesn't fit is refused (402, the same codes as before) before it is sent. The Worker
+sends the length held as `x-max-seconds`, so the model server refuses a longer take before typing it, and
+`yiddishCharge` counts what the model server measured (its answer's `seconds`) in place of the hold, once.
+`release` gives back the hold of a take that wasn't typed, `refund` what a shared file's job was counted when the job
+fails later, each once. A hold older than `TAKE_RUNS_MS` (210 s: the app's 180 s wait for a take and Cloudflare's 30 s
+after it) whose take never settled, because its Worker stopped (the phone's connection dropped, a deploy), is given back
+on the phone's next request (`account`); its result, if it still comes, is counted once. A take on bought hours is
+counted all of what was typed; hours it runs over stay below zero until the next top-up, as a normal recording's do
+(third review, 2026-11-25). A yiddishtry Worker from before this only checks and counts after, as before, and without the
+`yiddish_takes` table this server does the same, so either side can go out first; the hole closes once both are out.
+Release: the table, then `server/`, then yiddish-stt's `tryout/worker`. The cloud copy refuses a take longer than its
+hold only once yiddishvoicetotext's PR 1 cloud copy is deployed (`modal deploy backup/modal_app.py`), the PC once
+yiddish-stt PR 2 is merged and the PC's server restarted; until then a take whose size understates its length is
+typed whole and counted all of it. Installed apps need nothing new: the last take of the month that doesn't fit what
+is left is refused with the out-of-time message, where before it was typed. No phone is exempt
 (Isaac, same day: "I don't want mine to be different than everyone's"). GitHub builds never get a
 device token, so they don't offer Yiddish takes (`YiddishServer.available`); Yiddish is a normal
 language for the cloud model there. Apps before 0.9.14 send no device ID and get 503, which they

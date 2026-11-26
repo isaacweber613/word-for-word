@@ -90,6 +90,52 @@ CREATE TABLE IF NOT EXISTS grant_usage (
   PRIMARY KEY (grant_id, month)
 );
 
+-- Each Yiddish take or shared Yiddish file the yiddishtry Worker sends to be typed (review, 2026-11-25), under the
+-- Worker's own id for it (take). Before it is sent, held plan seconds are added to bucket's counter (usage, grant_usage,
+-- subscription_usage, or taken from credit); once the model server has typed it, charged (what it measured, twice)
+-- replaces held. state: held, charged, released (not typed: held given back), expired (held longer than any take can
+-- run, so its Worker stopped: held given back on the phone's next request, and charged all of it if its result still
+-- comes), or refunded (a shared file's job that failed after it was charged; job is its id). Added 2026-11-25: run this
+-- CREATE TABLE and its indexes on the live D1 before the deploy. Without the table, Yiddish takes are checked and
+-- counted as before.
+CREATE TABLE IF NOT EXISTS yiddish_takes (
+  take TEXT PRIMARY KEY,
+  device TEXT NOT NULL,
+  month TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  grant_id INTEGER,
+  sub_token TEXT,
+  sub_period INTEGER,
+  held REAL NOT NULL,
+  charged REAL,
+  state TEXT NOT NULL,
+  job TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS yiddish_takes_job ON yiddish_takes (job);
+CREATE INDEX IF NOT EXISTS yiddish_takes_device ON yiddish_takes (device, state);
+
+-- Each recording's hold while it is at OpenRouter (review, 2026-11-25), under a random id: before the recording is sent,
+-- held plan seconds are added to bucket's counter (as in yiddish_takes). Once OpenRouter has answered, charged (what it
+-- measured, or 0 when no model typed it) replaces held and the row is deleted. state: held, or expired (held longer than
+-- any request can run, the app's 70 s wait and Cloudflare's 30 s after the phone hangs up: held given back on the phone's
+-- next request, and charged all of it if the answer still comes). Added 2026-11-25: run this CREATE TABLE and its index on
+-- the live D1 before the deploy. Without the table, recordings are held and counted as before.
+CREATE TABLE IF NOT EXISTS recording_holds (
+  id TEXT PRIMARY KEY,
+  device TEXT NOT NULL,
+  month TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  grant_id INTEGER,
+  sub_token TEXT,
+  sub_period INTEGER,
+  held REAL NOT NULL,
+  charged REAL,
+  state TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS recording_holds_device ON recording_holds (device, state);
+
 -- Phones Google Play doesn't vouch for (Isaac, 2026-11-24: "a page where i can see phone's that fail the
 -- check and i can click a button to give them 30 minutes a month"). The app reports a failed check with
 -- POST /v1/register; yiddishvoicetotext.com, Admin, Failed checks lists them. reason is "google:<code>"

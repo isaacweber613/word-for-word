@@ -67,11 +67,28 @@ export async function verify(serviceAccount: string, product: string, token: str
     const state = (s.subscriptionState ?? "UNSPECIFIED").replace(/^SUBSCRIPTION_STATE_/, "");
     return Number.isFinite(expiry) ? { kind: "subscription", product: item?.productId ?? product, expiry, state } : null;
   }
-  const res = await fetcher(API + "/products/" + encodeURIComponent(product) + "/tokens/" + encodeURIComponent(token), { headers: auth });
-  if (!res.ok) return refused(res, serviceAccount);
-  const p = await res.json() as { purchaseState?: number };
-  return p.purchaseState === 0 ? { kind: "product", product } : null;
+  return await productState(serviceAccount, product, token, fetcher, now, auth) === 0 ? { kind: "product", product } : null;
 }
+
+/**
+ * Google's purchaseState of a one-time purchase: 0 purchased, 1 canceled (refunds included), 2 pending
+ * (developers.google.com/android-publisher/api-ref/rest/v3/purchases.products), or null when Google
+ * doesn't know the token. Throws when Google refuses this server or fails, like verify.
+ */
+export async function productState(serviceAccount: string, product: string, token: string, fetcher: typeof fetch, now: number,
+                                   auth?: { Authorization: string }): Promise<number | null> {
+  const headers = auth ?? { Authorization: "Bearer " + await accessToken(serviceAccount, PUBLISHER_SCOPE, fetcher, now) };
+  const res = await fetcher(API + "/products/" + encodeURIComponent(product) + "/tokens/" + encodeURIComponent(token), { headers });
+  if (!res.ok) return refused(res, serviceAccount);
+  const p = await res.json() as { purchaseState?: unknown };
+  return typeof p.purchaseState === "number" ? p.purchaseState : null;
+}
+
+/**
+ * How far back Google's Voided Purchases API lists refunds: its startTime "cannot be older than 30 days"
+ * (developers.google.com/android-publisher/api-ref/rest/v3/purchases.voidedpurchases/list, checked 2026-11-25).
+ */
+export const VOIDED_WINDOW_MS = 30 * 24 * 3600_000;
 
 /**
  * The purchase tokens of one-time purchases Google voided (refunded, canceled or charged back) in the

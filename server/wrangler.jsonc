@@ -13,11 +13,26 @@
     // the Access or Failed checks page. Turned on 2026-11-25: every testing track has 0.9.11 or later,
     // and the one phone that fails (a OnePlus 8 Pro) got 30 minutes a month on the Failed checks page.
     "REQUIRE_INTEGRITY": "true"
+    // Optional (review, 2026-11-25), off until Isaac picks the number: the longest recording one call may
+    // send, in seconds of audio, read from the audio itself. The app sends a shared file in pieces of at most 330 s (5 minutes,
+    // the last one up to 30 s more: AudioSplitter), so a number under 330 refuses parts of shared files; dictation has no cap.
+    // "MAX_RECORDING_SECONDS": "<Isaac's number>"
   },
+  // Optional rate limits (review, 2026-11-25), off until Isaac picks the numbers: recordings and purchase checks
+  // per phone, and phone checks (POST /v1/register, which anyone can call and which uses Google's daily
+  // Play Integrity quota) per internet address. period is 10 or 60 seconds; counts are per Cloudflare location
+  // and approximate. Phones on one mobile carrier can share an address, so keep that one generous.
+  // "ratelimits": [
+  //   { "name": "DEVICE_LIMITER", "namespace_id": "1001", "simple": { "limit": <Isaac's number>, "period": 60 } },
+  //   { "name": "ADDRESS_LIMITER", "namespace_id": "1002", "simple": { "limit": <Isaac's number>, "period": 60 } }
+  // ],
   // The app's address stays word-for-word.ynbsd6242.workers.dev. The route only answers the access links'
   // assetlinks.json; the rest of nuchemweber.com is untouched (the app's page is the word-for-word-site Worker).
   "workers_dev": true,
   "routes": [{ "pattern": "nuchemweber.com/.well-known/assetlinks.json", "zone_name": "nuchemweber.com" }]
   // Secret, set with `wrangler secret put OPENROUTER_KEY`: an OpenRouter key with a $10 monthly limit.
   // Also GOOGLE_SERVICE_ACCOUNT (the service account's JSON key) and DEVICE_TOKEN_SECRET (random).
+  // Optional secret OPENROUTER_PAID_KEY (review, 2026-11-25): a second OpenRouter key with its own limit, used only
+  // for phones whose subscription pays now, so free or given use that reaches OPENROUTER_KEY's limit can't stop them.
+  // OpenRouter keys can also reset their limit daily, which would give the free key a daily ceiling.
 }
