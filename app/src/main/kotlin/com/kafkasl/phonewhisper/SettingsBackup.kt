@@ -53,10 +53,19 @@ object SettingsBackup {
         null
     }
 
-    /** Replaces every current setting with [values]. */
+    /**
+     * Settings that belong to this phone, never to a file from another one: this phone's Play Integrity
+     * device token (the server refuses another phone's), its agreement to the Accessibility disclosure
+     * and to Yiddish training (Play wants each agreed on the phone itself), and its Yiddish install id,
+     * which keeps two people's voices apart in training.
+     */
+    val THIS_PHONE = setOf("device_token", "acc_disclosure_agreed", YiddishServer.CONSENT, "yiddish_install")
+
+    /** Replaces every current setting with [values], except [THIS_PHONE], which keep this phone's own. */
     fun apply(prefs: SharedPreferences, values: Map<String, Any>) {
+        val own = prefs.all.filterKeys { it in THIS_PHONE }.filterValues { it != null }
         val edit = prefs.edit().clear()
-        for ((key, value) in values) {
+        for ((key, value) in values.filterKeys { it !in THIS_PHONE } + own) {
             @Suppress("UNCHECKED_CAST")
             when (value) {
                 is Boolean -> edit.putBoolean(key, value)

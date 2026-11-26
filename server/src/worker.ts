@@ -10,7 +10,7 @@ import { d1Store } from "./store";
 export class Yiddish extends WorkerEntrypoint<Env> {
   /** Whether this phone may send a Yiddish take now. [token] is its X-Device-Token, [code] its X-Access-Code. */
   check(device: string, token: string | null, code?: string | null): Promise<CheckAnswer> {
-    return yiddishCheck(this.env, d1Store(this.env.DB), device, token, new Date(), code);
+    return yiddishCheck(this.env, d1Store(this.env.DB), device, token, new Date(), code, fetch, (p) => this.ctx.waitUntil(p));
   }
 
   /** Counts a Yiddish take of [seconds] that came back as text. */

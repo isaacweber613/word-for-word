@@ -74,6 +74,32 @@ export async function verify(serviceAccount: string, product: string, token: str
 }
 
 /**
+ * The purchase tokens of one-time purchases Google voided (refunded, canceled or charged back) in the
+ * last 30 days, from every page of its Voided Purchases API (developers.google.com/android-publisher/
+ * voided-purchases, checked 2026-11-25: "If a one-time product purchase in Purchased state gets refunded,
+ * you will also be made aware using the Voided Purchases API", developer.android.com/google/play/billing/
+ * lifecycle/one-time). Needs "View financial data", which the service account has. Throws when Google
+ * refuses or fails, so nothing counts as checked.
+ */
+export async function voidedPurchases(serviceAccount: string, fetcher: typeof fetch, now: number): Promise<string[]> {
+  const auth = { Authorization: "Bearer " + await accessToken(serviceAccount, PUBLISHER_SCOPE, fetcher, now) };
+  const tokens: string[] = [];
+  let page = "";
+  do {
+    // type 0: one-time purchases only (subscriptions are re-checked one by one, see recheckDue).
+    const res = await fetcher(API + "/voidedpurchases?type=0" + (page ? "&token=" + encodeURIComponent(page) : ""), { headers: auth });
+    if (!res.ok) {
+      console.error("Google Play voided purchases", res.status, (await res.text()).slice(0, 300));
+      throw new Error("Google answered " + res.status);
+    }
+    const body = await res.json() as { voidedPurchases?: { purchaseToken?: string }[]; tokenPagination?: { nextPageToken?: string } };
+    for (const v of body.voidedPurchases ?? []) if (typeof v.purchaseToken === "string") tokens.push(v.purchaseToken);
+    page = body.tokenPagination?.nextPageToken ?? "";
+  } while (page);
+  return tokens;
+}
+
+/**
  * Google said no. An unknown token is not paid (null); Google refusing this server (401, 403) or
  * failing (5xx) throws, so the app is told to try again instead of being told it didn't pay.
  */
