@@ -133,6 +133,7 @@ object YiddishServer {
                             else callback(failure(context, response.code, json))
                         }
                         // Nothing left: send the Google Play purchases again once, in case the subscription just renewed.
+                        // The server's answers to them say whether time is left (failure asks it otherwise).
                         code in OUT_CODES && !retried && Billing.available -> {
                             FreeMinutes.remember(context, out = true)
                             Billing.sync(context) { left -> if (left) send(true) else callback(failure(context, response.code, json)) }
@@ -217,7 +218,10 @@ object YiddishServer {
 
     private fun failure(context: Context, code: Int, json: JSONObject?): TranscriberClient.Result {
         val errorCode = json?.optString("code").orEmpty()
-        if (errorCode in OUT_CODES) FreeMinutes.remember(context, out = true)
+        // The server refuses a take that doesn't fit what is left (it holds a take's whole length first), so this
+        // doesn't mean nothing is left: its own answer says (third review, 2026-11-25: marking the phone out here
+        // stopped every Yiddish take until the app asked the server again).
+        if (errorCode in OUT_CODES) FreeMinutes.usage(context) { }
         val msg = when {
             code == 503 -> "The Yiddish model is offline right now (the computer running it is off)."
             errorCode == "free_minutes_used" -> FreeMinutes.OUT_FREE
