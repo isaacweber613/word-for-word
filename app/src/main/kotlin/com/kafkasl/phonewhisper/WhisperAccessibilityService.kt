@@ -79,124 +79,6 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     /** Volatile: the recording thread reads it to know when to stop. */
     @Volatile private var state = State.IDLE
-    /**
-     * The text box that had the cursor when this dictation started (or when a kept recording was sent
-     * again), so its words go there even if the cursor moved while they were on their way. Null when no
-     * box had the cursor; the words then go wherever one can take them, as before.
-     */
-    private var dictationTarget: AccessibilityNodeInfo? = null
-    /** What finds [dictationTarget] again once Android has made its screen anew ([SameBox]). */
-    private var dictationBox: BoxId? = null
-    /**
-     * Android made the screens anew since [dictationTarget] was picked: the phone turned, or the font size,
-     * dark mode or language changed. Most apps then replace their boxes with new ones.
-     */
-    private var screenRemade = false
-
-    /** A copy of the text box with the cursor now, or null. */
-    private fun focusedInput(): AccessibilityNodeInfo? = try {
-        val root = rootInActiveWindow
-        val node = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-        root?.recycle()
-        node?.takeIf { it.isEditable || it.className?.toString()?.contains("EditText") == true }
-            ?: run { node?.recycle(); null }
-    } catch (e: Exception) {
-        null
-    }
-
-    private fun setDictationTarget(node: AccessibilityNodeInfo?) {
-        dictationTarget?.recycle()
-        dictationTarget = node
-        dictationBox = node?.let { boxId(it, if (it.viewIdResourceName == null) orderOf(it) else null) }
-        screenRemade = false
-    }
-
-    /** The text boxes under [root], from the top of its tree down. */
-    private fun textBoxes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
-        val boxes = mutableListOf<AccessibilityNodeInfo>()
-        fun walk(node: AccessibilityNodeInfo) {
-            if (node.isEditable || node.className?.toString()?.contains("EditText") == true) boxes.add(AccessibilityNodeInfo.obtain(node))
-            for (i in 0 until node.childCount) node.getChild(i)?.let { walk(it); it.recycle() }
-        }
-        walk(root)
-        return boxes
-    }
-
-    /** Which text box [node] is in the active window ([BoxId.order]), or null. */
-    private fun orderOf(node: AccessibilityNodeInfo): Int? = try {
-        rootInActiveWindow?.let { root ->
-            val boxes = textBoxes(root)
-            root.recycle()
-            boxes.indexOf(node).takeIf { it >= 0 }.also { boxes.forEach { it.recycle() } }
-        }
-    } catch (_: Exception) {
-        null
-    }
-
-    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
-        super.onConfigurationChanged(newConfig)
-        screenRemade = true
-    }
-
-    /** [node]'s app, view ID, place in its window and window title (see [BoxId]). */
-    private fun boxId(node: AccessibilityNodeInfo, order: Int? = null): BoxId {
-        val window = try {
-            if (android.os.Build.VERSION.SDK_INT >= 24) node.window?.let { w -> w.title?.toString().also { w.recycle() } } else null
-        } catch (_: Exception) {
-            null
-        }
-        return BoxId(node.packageName?.toString(), node.viewIdResourceName, pathOf(node), window, node.windowId.takeIf { it >= 0 }, order)
-    }
-
-    /** The child number at each level from the window's top down to [node], or null when Android doesn't say. */
-    private fun pathOf(node: AccessibilityNodeInfo): List<Int>? {
-        val path = mutableListOf<Int>()
-        var child = AccessibilityNodeInfo.obtain(node)
-        try {
-            while (true) {
-                val parent = child.parent ?: return path.reversed()
-                var index = -1
-                for (i in 0 until parent.childCount) {
-                    val c = parent.getChild(i) ?: continue
-                    val same = c == child
-                    c.recycle()
-                    if (same) { index = i; break }
-                }
-                child.recycle()
-                child = parent
-                if (index < 0) return null
-                path.add(index)
-            }
-        } catch (_: Exception) {
-            return null
-        } finally {
-            child.recycle()
-        }
-    }
-
-    /**
-     * The box [old] made again in the active window after Android made the screen anew, or null. Never
-     * another box, such as another chat's message box with the same view ID: see [SameBox.find].
-     */
-    private fun remadeBox(old: BoxId?): AccessibilityNodeInfo? {
-        if (old?.app == null || !screenRemade) return null
-        val root = rootInActiveWindow ?: return null
-        return try {
-            if (root.packageName?.toString() != old.app) return null
-            // A box without a view ID is looked for among every text box, as the same numbered one (BoxId.order).
-            val found = if (old.viewId != null) root.findAccessibilityNodeInfosByViewId(old.viewId) else textBoxes(root)
-            val boxes = found.filter { it.isEditable || it.className?.toString()?.contains("EditText") == true }
-            val seen = boxes.mapIndexed { i, box -> boxId(box, if (old.viewId == null) i else null) }
-            Log.i(TAG, "Looking for the box made anew: window ${old.windowId}, boxes in windows ${seen.map { it.windowId }}")
-            val pick = SameBox.find(old, seen, screenRemade)?.let { boxes[it] }
-            found.forEach { if (it !== pick) it.recycle() }
-            pick
-        } catch (_: Exception) {
-            null
-        } finally {
-            root.recycle()
-        }
-    }
     /** The recording that failed to transcribe, kept so a tap can send it again. */
     private var failedPcm: ByteArray? = null
     /** The History entry a failed recording was saved to (its audio, entry time), so a later try updates it. */
@@ -263,8 +145,6 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (BuildConfig.DEBUG) {
             androidx.core.content.ContextCompat.registerReceiver(this, object : android.content.BroadcastReceiver() {
                 override fun onReceive(c: Context, i: android.content.Intent) {
-                    // Typed where the cursor is now, never into the box of an earlier recording that typed nothing.
-                    setDictationTarget(focusedInput())
                     handleTranscriptionResult(i.getStringExtra("text"), "debug")
                 }
             }, android.content.IntentFilter("com.isaacweber.wordforword.DEBUG_DICTATE"),
@@ -900,8 +780,6 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun retry() {
         val pcm = failedPcm ?: run { reset("Nothing to retry."); return }
         failedPcm = null
-        // A retry types where the cursor is now, since the person chose where to send it again.
-        setDictationTarget(focusedInput())
         state = State.TRANSCRIBING
         setAppearance(COLOR_BUSY)
         setBusy(true)
@@ -1035,8 +913,6 @@ class WhisperAccessibilityService : AccessibilityService() {
                 }
             }
         }
-        // After the microphone thread starts, so finding the box's place never holds up the first words.
-        setDictationTarget(focusedInput())
     }
 
     private fun stopAndTranscribe() {
@@ -1225,40 +1101,6 @@ class WhisperAccessibilityService : AccessibilityService() {
      * fall back to copying to the clipboard and pasting, and it says so on screen.
      */
     private fun injectText(text: String) {
-        // The box the dictation started in. The words arrive a moment after the stop, and by then the
-        // cursor may be in another box; they go only to this one, or stay on the clipboard and in History.
-        dictationTarget?.let { start ->
-            dictationTarget = null
-            var target = start
-            var alive = try { target.refresh() } catch (_: Exception) { false }
-            if (!alive) {
-                // Turning the phone makes most apps build the screen anew: the same box is there again as a new view.
-                remadeBox(dictationBox)?.let { again ->
-                    Log.i(TAG, "The box was made anew (the screen turned); typing into the new one")
-                    target.recycle()
-                    target = again
-                    alive = true
-                }
-            }
-            dictationBox = null
-            val typed = alive && (trySetText(target, text) || run {
-                (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                    .setPrimaryClip(ClipData.newPlainText("Word for Word", text))
-                tryPaste(target)
-            })
-            target.recycle()
-            if (typed) { Analytics.track("text_inserted", mapOf("method" to "typed")); return }
-            (getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager)
-                .setPrimaryClip(ClipData.newPlainText("Word for Word", text))
-            Analytics.track("text_inserted", mapOf("method" to if (alive) "clipboard_only" else "target_gone"))
-            // Still there but it took neither typing nor pasting: the same words as for any such box.
-            showFeedback(if (alive) "Couldn't type here. Copied to clipboard and saved to history"
-                         else "The box you dictated into is gone. Copied to clipboard and saved to history", 3000)
-            showingPasteFailure = true
-            handler.removeCallbacks(endPasteFailure)
-            handler.postDelayed(endPasteFailure, 3000)
-            return
-        }
         val candidates = findInjectionCandidates()
         Log.i(TAG, "Injecting text into ${candidates.size} candidate node(s)")
 
