@@ -436,4 +436,6 @@ Yiddish take or shared file blocked by the phone's last "nothing left" asks the 
 `.github/workflows/check.yml` compiles the builds and runs the unit tests on GitHub, for checks when the PC
 has no memory to spare. Shipped as 0.9.19 (versionCode 56): GitHub release, Play internal testing
 ("Available to internal testers"); closed testing not sent, since 0.9.18 went for review the same day.
+Isaac's phone gets Play builds from closed testing, not internal, so it stayed on 0.9.18 and still offered "Add 4
+hours for $1" after the subscription ended. 0.9.19 was sent to closed testing for review on 2026-11-27.
 Speed test: 40.1 ms from the stop to the upload starting. Not yet seen on Isaac's phone.
