@@ -63,8 +63,9 @@ key; the GitHub builds keep the debug key. Every change still goes into all thre
 Isaac (2026-11-19): Google reviews every Play update, so don't upload one for every small change.
 Collect changes and upload to Play at most once every day or two. GitHub releases still ship with
 each change. Upload a new `versionCode` in Play Console (Test and release, the track's Create new
-release), then send the change for review. Every Play release goes to closed testing
-too: Isaac's own phone is on that track (2026-11-27: 0.9.19 went only to internal, so his phone kept the bug it fixed).
+release), then send the change for review. Every Play release goes to internal and closed
+testing at the same time, so Isaac has the same version as everybody (Isaac, 2026-11-27: "I don't like when I
+have a different version then everybody"; 0.9.19 went only to internal, so his phone kept the bug it fixed).
 
 Isaac (2026-11-19), after Play notes said Yiddish works "when the developer's PC is busy or off":
 "There was no need in mentioning the developer's PC. Nobody needs to know that it goes to my PC."
